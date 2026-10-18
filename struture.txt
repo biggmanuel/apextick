@@ -1,0 +1,10 @@
+hyperflow-clone/
+├── .env                        # Admin password & optional API keys
+├── config.py                   # Watchlist pairs, TP/SL %, & risk settings
+├── database.py                 # SQLite setup (Accounts, Toggles, Trades, Logs)
+├── btc_decline_signal.py       # BTC 60s Buy/Sell pressure & 1h Decline Gate
+├── spot_engine.py              # Spot bot ("Never close below TP" logic)
+├── futures_engine.py           # Futures bot (TP, CANDLE SL, SL Recovery, 70% split)
+├── app.py                      # Flask server + background bot threads
+└── templates/
+    └── dashboard.html          # Your live web dashboard UI
