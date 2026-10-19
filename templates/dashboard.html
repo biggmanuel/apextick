@@ -275,11 +275,13 @@
 
             } catch (err) {
                 console.error("Dashboard poll error:", err);
+            } finally {
+                // Queue the next cycle only AFTER this one completely finishes
+                setTimeout(fetchDashboardData, 3000);
             }
         }
 
-        // Poll every 3 seconds
-        setInterval(fetchDashboardData, 3000);
+        // Initialize the first call
         fetchDashboardData();
     </script>
 </body>
