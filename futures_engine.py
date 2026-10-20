@@ -445,9 +445,13 @@ def run_futures_engine_tick() -> str:
         margin_usdt = max(target_margin_usdt, FUTURES_CONFIG["min_margin_usdt"])
         margin_usdt = min(margin_usdt, available_margin)
 
-        # 4. Pair Selection & Virtual Ledger Execution
+    # 4. Pair Selection & Virtual Ledger Execution
         for p_info in pairs:
             pair = p_info["pair"]
+            
+            # --- STRICT BAN ON THE BIG 3 GIANTS ---
+            if pair in ["BTC/USDT", "ETH/USDT", "BNB/USDT"]:
+                continue
             
             # Prevent opening duplicate positions on the same coin
             if pair in held_pairs:

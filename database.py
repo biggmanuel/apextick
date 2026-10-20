@@ -1,7 +1,7 @@
 import sqlite3
 from datetime import datetime, timezone
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import psycopg
+from psycopg.rows import dict_row
 from config import DATABASE_URL, SQLITE_DB_PATH
 import time
 
@@ -11,7 +11,7 @@ IS_POSTGRES = DATABASE_URL.startswith("postgres://") or DATABASE_URL.startswith(
 def get_connection():
     """Returns a PostgreSQL connection if DATABASE_URL is set, otherwise local SQLite with a timeout."""
     if IS_POSTGRES:
-        return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        return psycopg.connect(DATABASE_URL, row_factory=dict_row)
     # Increased timeout to 15 seconds so SQLite waits gracefully if another thread is writing
     conn = sqlite3.connect(SQLITE_DB_PATH, timeout=15.0, check_same_thread=False)
     # Use WAL mode to vastly improve concurrent read/write performance
