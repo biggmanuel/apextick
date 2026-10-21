@@ -20,15 +20,15 @@ STALE_PRICE_THRESHOLD_SECONDS = 300   # Max allowed age for a fallback price
 def get_live_price_safely(pair: str) -> float:
     """
     Safely retrieves the current market price for a given pair.
-    Prefers the real-time WebSocket stream (MARKET_STATE), falls back to the
-    database's last known price, and completely rejects invalid/stale prices.
+    Prefers the real-time stream (MARKET_STATE), falls back to the database's
+    last known price, and completely rejects invalid/stale prices.
     """
     current_price = MARKET_STATE["live_prices"].get(pair)
     
     if current_price and current_price > 0:
         return float(current_price)
 
-    # Fallback to database if WebSocket is momentarily out of sync
+    # Fallback to database if stream is momentarily out of sync
     p_row = execute_query(
         "SELECT last_price FROM trading_pairs WHERE pair = ?", 
         (pair,), 
@@ -77,11 +77,19 @@ def is_account_on_futures_cooldown(account_id: str) -> tuple[bool, int]:
     time-based cooldown window after a trade is successfully opened.
     """
     last_trade = execute_query(
-        "SELECT opened_at FROM futures_trades WHERE account_id = ? ORDER BY id DESC LIMIT 1",
+        "SELECT opened_at FROM futures_trades WHERE account_id = ? AND status = 'OPEN' ORDER BY id DESC LIMIT 1",
         (account_id,), 
         fetch_one=True
     )
     
+    if not last_trade or not last_trade.get("opened_at"):
+        # Fall back to checking any recent open record
+        last_trade = execute_query(
+            "SELECT opened_at FROM futures_trades WHERE account_id = ? ORDER BY id DESC LIMIT 1",
+            (account_id,),
+            fetch_one=True
+        )
+
     if not last_trade or not last_trade.get("opened_at"):
         return False, 0
 
@@ -110,8 +118,8 @@ def run_futures_engine_tick() -> str:
     Master loop for the Live Paper Trading Futures Engine.
     Executes a complete evaluation cycle across all active accounts and pairs.
     
-    Phase 1: Position Management (Tiered TP Scaling, Stop Loss, Trailing Recovery)
-    Phase 2: Market Scanning & New Trade Execution
+    Phase 1: Position Management (Instant TP Logging, Outlier Trailing, Stop Loss, Trailing Recovery)
+    Phase 2: Market Scanning & New Trade Execution (Excluding BTC/ETH/BNB)
     """
     
     # Fetch actively supported futures pairs sorted by 24h volume
@@ -138,7 +146,7 @@ def run_futures_engine_tick() -> str:
     activity_summary = []
 
     # -------------------------------------------------------------------------
-    # PHASE 1: MANAGE OPEN POSITIONS (TIERED SCALING + ADVANCED RISK EXITS)
+    # PHASE 1: MANAGE OPEN POSITIONS (INSTANT LOGGING + OUTLIER RUNNER ENGINE)
     # -------------------------------------------------------------------------
     
     for acct in accounts:
@@ -187,97 +195,17 @@ def run_futures_engine_tick() -> str:
                 commit=True
             )
 
-            # Retrieve margin state
             orig_margin = float(trade["margin_usdt"])
             rem_margin = float(trade.get("remaining_margin_usdt") or orig_margin)
             accumulated_pnl = float(trade.get("pnl_usdt") or 0.0)
-
             tp1_hit = int(trade.get("tp1_hit") or 0)
             tp2_hit = int(trade.get("tp2_hit") or 0)
+            now_str = datetime.now(timezone.utc).isoformat()
 
             # =================================================================
-            # TIER 3 HIT (+100% ROI): FINAL PORTION CLOSE
+            # TIER 1 HIT (+20% ROI): SCALE OUT 30% + LOG IMMEDIATE CLOSE EVENT
             # =================================================================
-            if roi_pct >= FUTURES_CONFIG["tp3_roi"]:
-                notional_closed = rem_margin * leverage
-                gross_pnl = rem_margin * (roi_pct / 100.0)
-                fee_usdt = notional_closed * (FUTURES_CONFIG["fee_pct"] / 100.0)
-                net_partial_pnl = gross_pnl - fee_usdt
-                total_trade_pnl = accumulated_pnl + net_partial_pnl
-                
-                close_time = datetime.now(timezone.utc).isoformat()
-
-                execute_query(
-                    """
-                    UPDATE futures_trades
-                    SET status = 'CLOSED', exit_price = ?, remaining_margin_usdt = 0.0,
-                        pnl_usdt = ?, pnl_pct = ?, close_type = 'TP3 (+100% ROI)', 
-                        tp3_hit = 1, closed_at = ?
-                    WHERE id = ?
-                    """,
-                    (current_price, total_trade_pnl, roi_pct, close_time, trade_id),
-                    commit=True
-                )
-
-                # Route profits to balance and live withdraw pool
-                balance += (rem_margin + net_partial_pnl)
-                withdraw_pool_add = net_partial_pnl * FUTURES_CONFIG["withdraw_split_pct"] if net_partial_pnl > 0 else 0.0
-                
-                execute_query(
-                    "UPDATE accounts SET futures_balance_usdt = ?, futures_live_withdraw = futures_live_withdraw + ? WHERE account_id = ?",
-                    (balance, withdraw_pool_add, acct_id),
-                    commit=True
-                )
-
-                msg = f"[{acct['display_name']}] FUTURES TP3 HIT 🎯: Fully closed {pair} {direction} at ${current_price:,.4f} | Final PnL: +${total_trade_pnl:.2f}"
-                add_log("SUCCESS", "apextick_bot", msg)
-                activity_summary.append(msg)
-                continue
-
-            # =================================================================
-            # TIER 2 HIT (+50% ROI): 40% SCALE OUT
-            # =================================================================
-            elif roi_pct >= FUTURES_CONFIG["tp2_roi"] and not tp2_hit:
-                margin_to_close = orig_margin * FUTURES_CONFIG["tp2_close_ratio"]
-                if margin_to_close > rem_margin:
-                    margin_to_close = rem_margin
-
-                notional_closed = margin_to_close * leverage
-                gross_pnl = margin_to_close * (roi_pct / 100.0)
-                fee_usdt = notional_closed * (FUTURES_CONFIG["fee_pct"] / 100.0)
-                net_partial_pnl = gross_pnl - fee_usdt
-                
-                new_rem_margin = rem_margin - margin_to_close
-                total_trade_pnl = accumulated_pnl + net_partial_pnl
-
-                execute_query(
-                    """
-                    UPDATE futures_trades
-                    SET remaining_margin_usdt = ?, pnl_usdt = ?, pnl_pct = ?, tp2_hit = 1
-                    WHERE id = ?
-                    """,
-                    (new_rem_margin, total_trade_pnl, roi_pct, trade_id),
-                    commit=True
-                )
-
-                balance += (margin_to_close + net_partial_pnl)
-                withdraw_pool_add = net_partial_pnl * FUTURES_CONFIG["withdraw_split_pct"] if net_partial_pnl > 0 else 0.0
-                
-                execute_query(
-                    "UPDATE accounts SET futures_balance_usdt = ?, futures_live_withdraw = futures_live_withdraw + ? WHERE account_id = ?",
-                    (balance, withdraw_pool_add, acct_id),
-                    commit=True
-                )
-
-                msg = f"[{acct['display_name']}] FUTURES TP2 HIT 🚀: Scaled out 40% on {pair} {direction} at ${current_price:,.4f} | Locked: +${net_partial_pnl:.2f}"
-                add_log("SUCCESS", "apextick_bot", msg)
-                activity_summary.append(msg)
-                continue
-
-            # =================================================================
-            # TIER 1 HIT (+20% ROI): 30% SCALE OUT
-            # =================================================================
-            elif roi_pct >= FUTURES_CONFIG["tp1_roi"] and not tp1_hit:
+            if roi_pct >= FUTURES_CONFIG["tp1_roi"] and not tp1_hit:
                 margin_to_close = orig_margin * FUTURES_CONFIG["tp1_close_ratio"]
                 if margin_to_close > rem_margin:
                     margin_to_close = rem_margin
@@ -286,23 +214,38 @@ def run_futures_engine_tick() -> str:
                 gross_pnl = margin_to_close * (roi_pct / 100.0)
                 fee_usdt = notional_closed * (FUTURES_CONFIG["fee_pct"] / 100.0)
                 net_partial_pnl = gross_pnl - fee_usdt
-                
                 new_rem_margin = rem_margin - margin_to_close
                 total_trade_pnl = accumulated_pnl + net_partial_pnl
 
+                # 1. Insert distinct closed event into history table immediately
                 execute_query(
                     """
-                    UPDATE futures_trades
-                    SET remaining_margin_usdt = ?, pnl_usdt = ?, pnl_pct = ?, tp1_hit = 1
-                    WHERE id = ?
+                    INSERT INTO futures_trades (
+                        account_id, pair, direction, status, entry_price, exit_price,
+                        margin_usdt, remaining_margin_usdt, notional_usdt, leverage,
+                        pnl_usdt, pnl_pct, close_type, peak_roi_pct, worst_roi_pct,
+                        tp1_hit, tp2_hit, tp3_hit, opened_at, closed_at
+                    ) VALUES (?, ?, ?, 'CLOSED', ?, ?, ?, 0.0, ?, ?, ?, ?, 'TP1 (+20% ROI)', ?, ?, 1, 0, 0, ?, ?)
                     """,
+                    (
+                        acct_id, pair, direction, entry_price, current_price,
+                        margin_to_close, notional_closed, leverage,
+                        net_partial_pnl, roi_pct, peak_roi, worst_roi,
+                        trade["opened_at"], now_str
+                    ),
+                    commit=True
+                )
+
+                # 2. Update remaining active bag on parent record
+                execute_query(
+                    "UPDATE futures_trades SET remaining_margin_usdt = ?, pnl_usdt = ?, pnl_pct = ?, tp1_hit = 1 WHERE id = ?",
                     (new_rem_margin, total_trade_pnl, roi_pct, trade_id),
                     commit=True
                 )
 
+                # 3. Credit wallet balance and 70% live withdraw pool
                 balance += (margin_to_close + net_partial_pnl)
                 withdraw_pool_add = net_partial_pnl * FUTURES_CONFIG["withdraw_split_pct"] if net_partial_pnl > 0 else 0.0
-                
                 execute_query(
                     "UPDATE accounts SET futures_balance_usdt = ?, futures_live_withdraw = futures_live_withdraw + ? WHERE account_id = ?",
                     (balance, withdraw_pool_add, acct_id),
@@ -315,22 +258,126 @@ def run_futures_engine_tick() -> str:
                 continue
 
             # =================================================================
-            # RISK EXITS: STRUCTURAL SL, CANDLE SL, AND RECOVERY TRAILING
+            # TIER 2 HIT (+50% ROI): SCALE OUT 40% + LOG IMMEDIATE CLOSE EVENT
             # =================================================================
-            close_type = ""
+            elif roi_pct >= FUTURES_CONFIG["tp2_roi"] and not tp2_hit:
+                margin_to_close = orig_margin * FUTURES_CONFIG["tp2_close_ratio"]
+                if margin_to_close > rem_margin:
+                    margin_to_close = rem_margin
+
+                notional_closed = margin_to_close * leverage
+                gross_pnl = margin_to_close * (roi_pct / 100.0)
+                fee_usdt = notional_closed * (FUTURES_CONFIG["fee_pct"] / 100.0)
+                net_partial_pnl = gross_pnl - fee_usdt
+                new_rem_margin = rem_margin - margin_to_close
+                total_trade_pnl = accumulated_pnl + net_partial_pnl
+
+                # 1. Insert distinct closed event into history table immediately
+                execute_query(
+                    """
+                    INSERT INTO futures_trades (
+                        account_id, pair, direction, status, entry_price, exit_price,
+                        margin_usdt, remaining_margin_usdt, notional_usdt, leverage,
+                        pnl_usdt, pnl_pct, close_type, peak_roi_pct, worst_roi_pct,
+                        tp1_hit, tp2_hit, tp3_hit, opened_at, closed_at
+                    ) VALUES (?, ?, ?, 'CLOSED', ?, ?, ?, 0.0, ?, ?, ?, ?, 'TP2 (+50% ROI)', ?, ?, tp1_hit, 1, 0, ?, ?)
+                    """,
+                    (
+                        acct_id, pair, direction, entry_price, current_price,
+                        margin_to_close, notional_closed, leverage,
+                        net_partial_pnl, roi_pct, peak_roi, worst_roi,
+                        trade["opened_at"], now_str
+                    ),
+                    commit=True
+                )
+
+                # 2. Update remaining active bag on parent record
+                execute_query(
+                    "UPDATE futures_trades SET remaining_margin_usdt = ?, pnl_usdt = ?, pnl_pct = ?, tp2_hit = 1 WHERE id = ?",
+                    (new_rem_margin, total_trade_pnl, roi_pct, trade_id),
+                    commit=True
+                )
+
+                # 3. Credit wallet balance and 70% live withdraw pool
+                balance += (margin_to_close + net_partial_pnl)
+                withdraw_pool_add = net_partial_pnl * FUTURES_CONFIG["withdraw_split_pct"] if net_partial_pnl > 0 else 0.0
+                execute_query(
+                    "UPDATE accounts SET futures_balance_usdt = ?, futures_live_withdraw = futures_live_withdraw + ? WHERE account_id = ?",
+                    (balance, withdraw_pool_add, acct_id),
+                    commit=True
+                )
+
+                msg = f"[{acct['display_name']}] FUTURES TP2 HIT 🚀: Scaled out 40% on {pair} {direction} at ${current_price:,.4f} | Locked: +${net_partial_pnl:.2f}"
+                add_log("SUCCESS", "apextick_bot", msg)
+                activity_summary.append(msg)
+                continue
+
+            # =================================================================
+            # OUTLIER RUNNER ENGINE (+80% TO +400% ROI TRAILING RUNNER)
+            # =================================================================
+            outlier_triggered = False
+            close_label = ""
+
+            outlier_arm = FUTURES_CONFIG.get("outlier_arm_roi", 80.0)
+            trail_buffer = FUTURES_CONFIG.get("outlier_trail_buffer_pct", 25.0)
+            hard_cap = FUTURES_CONFIG.get("hard_tp3_cap_roi", 400.0)
+
+            if peak_roi >= outlier_arm:
+                if (peak_roi - roi_pct) >= trail_buffer:
+                    outlier_triggered = True
+                    close_label = f"TP3 Outlier Trail (+{roi_pct:.1f}% ROI)"
+                elif roi_pct >= hard_cap:
+                    outlier_triggered = True
+                    close_label = f"TP3 Outlier Max (+{roi_pct:.1f}% ROI)"
+
+            if outlier_triggered:
+                notional_closed = rem_margin * leverage
+                gross_pnl = rem_margin * (roi_pct / 100.0)
+                fee_usdt = notional_closed * (FUTURES_CONFIG["fee_pct"] / 100.0)
+                net_final_pnl = gross_pnl - fee_usdt
+
+                execute_query(
+                    """
+                    UPDATE futures_trades
+                    SET status = 'CLOSED', exit_price = ?, remaining_margin_usdt = 0.0,
+                        margin_usdt = ?, notional_usdt = ?, pnl_usdt = ?, pnl_pct = ?,
+                        close_type = ?, tp3_hit = 1, closed_at = ?
+                    WHERE id = ?
+                    """,
+                    (current_price, rem_margin, notional_closed, net_final_pnl, roi_pct, close_label, now_str, trade_id),
+                    commit=True
+                )
+
+                balance += (rem_margin + net_final_pnl)
+                withdraw_pool_add = net_final_pnl * FUTURES_CONFIG["withdraw_split_pct"] if net_final_pnl > 0 else 0.0
+                execute_query(
+                    "UPDATE accounts SET futures_balance_usdt = ?, futures_live_withdraw = futures_live_withdraw + ? WHERE account_id = ?",
+                    (balance, withdraw_pool_add, acct_id),
+                    commit=True
+                )
+
+                msg = f"[{acct['display_name']}] 🔥 {close_label}: Final bag closed on {pair} {direction} at ${current_price:,.4f} | Profit: +${net_final_pnl:.2f}"
+                add_log("SUCCESS", "apextick_bot", msg)
+                activity_summary.append(msg)
+                continue
+
+            # =================================================================
+            # RISK EXITS: CANDLE SL, STRUCTURAL SL & RECOVERY TRAILING
+            # =================================================================
+            risk_exit_type = ""
             
-            # 1. Structural Stop Loss (Extreme protection)
+            # 1. Structural Stop Loss (Extreme emergency protection)
             if roi_pct <= FUTURES_CONFIG["hard_sl_roi_pct"]:
-                close_type = "STRUCTURAL SL"
+                risk_exit_type = "STRUCTURAL SL"
                 
-            # 2. Candle SL (Triggered only if trade never gained traction)
+            # 2. Candle SL (Rapid invalidation if setup never gained traction)
             elif roi_pct <= FUTURES_CONFIG["candle_sl_roi_pct"] and peak_roi < 2.5:
-                close_type = "CANDLE SL"
+                risk_exit_type = "CANDLE SL"
                 
             # 3. Recovery Mode Exits
             elif trade.get("close_type") == "Recovery":
                 if roi_pct >= FUTURES_CONFIG["recovery_tp_roi_pct"]:
-                    close_type = "TP (Recovery Exit)"
+                    risk_exit_type = "TP (Recovery Exit)"
             elif roi_pct <= FUTURES_CONFIG["recovery_arm_roi_pct"] and not trade.get("close_type"):
                 execute_query(
                     "UPDATE futures_trades SET close_type = 'Recovery' WHERE id = ?", 
@@ -340,23 +387,21 @@ def run_futures_engine_tick() -> str:
                 continue
 
             # Process the exit transaction if any risk cut was triggered
-            if close_type:
+            if risk_exit_type:
                 notional_closed = rem_margin * leverage
                 gross_loss = rem_margin * (roi_pct / 100.0)
                 fee_usdt = notional_closed * (FUTURES_CONFIG["fee_pct"] / 100.0)
                 net_loss = gross_loss - fee_usdt
-                total_trade_pnl = accumulated_pnl + net_loss
-                
-                close_time = datetime.now(timezone.utc).isoformat()
 
                 execute_query(
                     """
                     UPDATE futures_trades
                     SET status = 'CLOSED', exit_price = ?, remaining_margin_usdt = 0.0,
-                        pnl_usdt = ?, pnl_pct = ?, close_type = ?, closed_at = ?
+                        margin_usdt = ?, notional_usdt = ?, pnl_usdt = ?, pnl_pct = ?,
+                        close_type = ?, closed_at = ?
                     WHERE id = ?
                     """,
-                    (current_price, total_trade_pnl, roi_pct, close_type, close_time, trade_id),
+                    (current_price, rem_margin, notional_closed, net_loss, roi_pct, risk_exit_type, now_str, trade_id),
                     commit=True
                 )
 
@@ -368,8 +413,8 @@ def run_futures_engine_tick() -> str:
                     commit=True
                 )
 
-                log_level = "WARNING" if total_trade_pnl < 0 else "SUCCESS"
-                msg = f"[{acct['display_name']}] FUTURES {close_type}: {pair} {direction} closed at ${current_price:,.4f} | Total PnL: ${total_trade_pnl:+.2f}"
+                log_level = "WARNING" if net_loss < 0 else "SUCCESS"
+                msg = f"[{acct['display_name']}] FUTURES {risk_exit_type}: {pair} {direction} closed at ${current_price:,.4f} | PnL: ${net_loss:+.2f}"
                 add_log(log_level, "apextick_bot", msg)
                 activity_summary.append(msg)
 
@@ -445,11 +490,11 @@ def run_futures_engine_tick() -> str:
         margin_usdt = max(target_margin_usdt, FUTURES_CONFIG["min_margin_usdt"])
         margin_usdt = min(margin_usdt, available_margin)
 
-    # 4. Pair Selection & Virtual Ledger Execution
+        # 4. Pair Selection & Virtual Ledger Execution (Excluding Big 3)
         for p_info in pairs:
             pair = p_info["pair"]
             
-            # --- STRICT BAN ON THE BIG 3 GIANTS ---
+            # --- STRICT BAN ON THE BIG 3 (Forces high-volume altcoin scalping) ---
             if pair in ["BTC/USDT", "ETH/USDT", "BNB/USDT"]:
                 continue
             
