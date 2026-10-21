@@ -19,8 +19,7 @@
         .header { background: var(--bg-card); padding: 20px 24px; border-radius: 12px; margin-bottom: 20px; border: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; }
         .header h1 { font-size: 1.5rem; font-weight: 600; display: flex; align-items: center; gap: 10px; color: var(--accent-cyan); }
         .header-actions { display: flex; align-items: center; gap: 12px; }
-        .status-badge { padding: 7px 13px; border-radius: 20px; font-weight: 600; font-size: 0.7rem; text-transform: uppercase; background: rgba(0, 255, 136, 0.2); color: var(--profit); border: 1px solid rgba(0, 255, 136, 0.4); }
-        .api-badge { padding: 7px 13px; border-radius: 20px; font-weight: 600; font-size: 0.7rem; text-transform: uppercase; background: rgba(0, 255, 136, 0.2); color: var(--profit); border: 1px solid rgba(0, 255, 136, 0.4); }
+        .status-badge, .api-badge { padding: 7px 13px; border-radius: 20px; font-weight: 600; font-size: 0.7rem; text-transform: uppercase; background: rgba(0, 255, 136, 0.2); color: var(--profit); border: 1px solid rgba(0, 255, 136, 0.4); }
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 20px; }
         .stat-card { background: var(--bg-card); padding: 20px; border-radius: 12px; border: 1px solid var(--border-subtle); }
         .stat-card h3 { font-size: 0.7rem; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 10px; }
@@ -32,17 +31,28 @@
         .card { background: var(--bg-card); padding: 20px; border-radius: 12px; border: 1px solid var(--border-subtle); margin-bottom: 20px; }
         .card h2 { font-size: 1rem; font-weight: 600; color: var(--accent-cyan); margin-bottom: 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border-subtle); }
         
-        /* Compounding Scrollable Rectangular Containers */
+        /* Table Styling */
         .table-scroll-box { max-height: 400px; overflow-y: auto; border-radius: 8px; border: 1px solid var(--border-subtle); background: rgba(11, 15, 24, 0.4); }
         .table-scroll-box::-webkit-scrollbar { width: 6px; }
         .table-scroll-box::-webkit-scrollbar-track { background: transparent; }
         .table-scroll-box::-webkit-scrollbar-thumb { background: rgba(0, 212, 255, 0.3); border-radius: 999px; }
-
         .trades-table { width: 100%; border-collapse: collapse; }
         .trades-table th { background: rgba(0, 212, 255, 0.08); padding: 12px 14px; text-align: left; font-size: 0.7rem; font-weight: 600; color: var(--text-secondary); border-bottom: 1px solid var(--border-subtle); position: sticky; top: 0; z-index: 2; }
         .trades-table td { padding: 12px 14px; border-bottom: 1px solid rgba(255, 255, 255, 0.04); font-size: 0.85rem; }
         .trades-table tbody tr:hover { background: rgba(18, 24, 43, 0.6); }
 
+        /* UI Upgrade: Badges & Buttons */
+        .tp-badge { font-size: 0.65rem; padding: 3px 6px; border-radius: 4px; margin-right: 4px; font-weight: 700; letter-spacing: 0.05em; display: inline-block; }
+        .tp-hit { background: rgba(0, 255, 136, 0.15); color: var(--profit); border: 1px solid var(--profit); box-shadow: 0 0 6px rgba(0, 255, 136, 0.2); }
+        .tp-pending { background: rgba(100, 116, 139, 0.15); color: var(--text-muted); border: 1px solid rgba(100, 116, 139, 0.4); }
+        .btn-force-close { background: rgba(255, 71, 87, 0.1); color: var(--loss); border: 1px solid rgba(255, 71, 87, 0.5); border-radius: 6px; padding: 5px 12px; cursor: pointer; font-size: 0.75rem; font-weight: 600; transition: 0.2s; }
+        .btn-force-close:hover { background: var(--loss); color: #fff; box-shadow: 0 0 10px rgba(255, 71, 87, 0.4); }
+        .tag-dir { padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
+        .tag-long { background: rgba(0, 255, 136, 0.15); color: var(--profit); }
+        .tag-short { background: rgba(168, 85, 247, 0.15); color: var(--accent-purple); }
+        .tag-spot { background: rgba(0, 212, 255, 0.15); color: var(--accent-cyan); }
+
+        /* Logs & Pressure */
         .logs-container { background: rgba(6, 9, 15, 0.95); padding: 16px; border-radius: 12px; border: 1px solid var(--border-subtle); height: 400px; max-height: 400px; overflow-y: auto; font-family: monospace; font-size: 0.8rem; line-height: 1.5; }
         .log-entry { padding: 6px 10px; border-bottom: 1px solid rgba(255, 255, 255, 0.04); }
         .log-entry.success { color: var(--profit); }
@@ -55,11 +65,8 @@
         .btc-pressure-panel { flex: 1 1 320px; }
         .btc-pressure-row { display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 0.9rem; color: var(--text-secondary); }
         .btc-pressure-bar { height: 14px; border-radius: 999px; background: rgba(255, 255, 255, 0.04); border: 1px solid var(--border-subtle); overflow: hidden; margin-bottom: 10px; }
-        .btc-pressure-bar-fill { height: 100%; background: linear-gradient(90deg, rgba(0, 212, 255, 0.18), rgba(0, 255, 136, 0.22)); width: 50%; }
-        .btc-pressure-bar-sell-fill { height: 100%; background: linear-gradient(90deg, rgba(255, 71, 87, 0.12), rgba(255, 71, 87, 0.22)); width: 50%; }
-        .tag-dir { padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
-        .tag-long { background: rgba(0, 255, 136, 0.15); color: var(--profit); }
-        .tag-short { background: rgba(168, 85, 247, 0.15); color: var(--accent-purple); }
+        .btc-pressure-bar-fill { height: 100%; background: linear-gradient(90deg, rgba(0, 212, 255, 0.18), rgba(0, 255, 136, 0.6)); transition: width 0.5s ease; }
+        .btc-pressure-bar-sell-fill { height: 100%; background: linear-gradient(90deg, rgba(255, 71, 87, 0.12), rgba(255, 71, 87, 0.6)); transition: width 0.5s ease; }
     </style>
 </head>
 <body>
@@ -76,26 +83,11 @@
         <section class="card">
             <h2>📊 Spot Trading (Protocol 3 Brain-Upgraded)</h2>
             <div class="stats-grid">
-                <div class="stat-card">
-                    <h3>Total Profit</h3>
-                    <div id="spot-profit" class="stat-value positive">$0.00</div>
-                </div>
-                <div class="stat-card">
-                    <h3>Win Rate</h3>
-                    <div id="spot-winrate" class="stat-value">0.00%</div>
-                </div>
-                <div class="stat-card">
-                    <h3>Total Trades</h3>
-                    <div id="spot-trades" class="stat-value">0</div>
-                </div>
-                <div class="stat-card">
-                    <h3>Open Positions</h3>
-                    <div id="spot-open" class="stat-value">0</div>
-                </div>
-                <div class="stat-card">
-                    <h3>Portfolio Value</h3>
-                    <div id="spot-portfolio" class="stat-value">$325.00</div>
-                </div>
+                <div class="stat-card"><h3>Total Profit</h3><div id="spot-profit" class="stat-value positive">$0.00</div></div>
+                <div class="stat-card"><h3>Win Rate</h3><div id="spot-winrate" class="stat-value">0.00%</div></div>
+                <div class="stat-card"><h3>Total Trades</h3><div id="spot-trades" class="stat-value">0</div></div>
+                <div class="stat-card"><h3>Open Positions</h3><div id="spot-open" class="stat-value">0</div></div>
+                <div class="stat-card"><h3>Portfolio Value</h3><div id="spot-portfolio" class="stat-value">$250.00</div></div>
             </div>
         </section>
 
@@ -103,28 +95,43 @@
         <section class="card">
             <h2>⚡ USDT-M Futures (future_protocol3 Brain-Upgraded)</h2>
             <div class="stats-grid">
-                <div class="stat-card">
-                    <h3>Net P&L</h3>
-                    <div id="fut-pnl" class="stat-value positive">$0.00</div>
-                </div>
-                <div class="stat-card">
-                    <h3>Win Rate</h3>
-                    <div id="fut-winrate" class="stat-value">0.00%</div>
-                </div>
-                <div class="stat-card">
-                    <h3>Completed Trades</h3>
-                    <div id="fut-trades" class="stat-value">0</div>
-                </div>
-                <div class="stat-card">
-                    <h3>Open Positions</h3>
-                    <div id="fut-open" class="stat-value">0</div>
-                </div>
-                <div class="stat-card">
-                    <h3>Live Withdraw Pool (70%)</h3>
-                    <div id="fut-withdraw" class="stat-value positive">$0.00</div>
-                </div>
+                <div class="stat-card"><h3>Net P&L</h3><div id="fut-pnl" class="stat-value positive">$0.00</div></div>
+                <div class="stat-card"><h3>Win Rate</h3><div id="fut-winrate" class="stat-value">0.00%</div></div>
+                <div class="stat-card"><h3>Completed Trades</h3><div id="fut-trades" class="stat-value">0</div></div>
+                <div class="stat-card"><h3>Open Positions</h3><div id="fut-open" class="stat-value">0</div></div>
+                <div class="stat-card"><h3>Live Withdraw Pool (70%)</h3><div id="fut-withdraw" class="stat-value positive">$0.00</div></div>
             </div>
         </section>
+
+        <!-- ACTIVE POSITIONS MASTER TABLE -->
+        <div class="card" id="active-positions-section" style="margin-bottom: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-subtle); padding-bottom: 10px; margin-bottom: 16px;">
+                <h2 style="border: none; margin: 0; padding: 0;">🟢 Active Open Positions (Floating P&L)</h2>
+                <select id="account-filter" style="background: rgba(15, 23, 42, 0.75); color: var(--text-primary); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 6px 10px; font-weight: 600;">
+                    <option value="ALL">All Accounts (Combined View)</option>
+                    <option value="Demo_Full">Demo_Full_250</option>
+                    <option value="Emmanuel_Micro">Emmanuel_Micro_75</option>
+                </select>
+            </div>
+            <div class="table-scroll-box" style="max-height: 350px;">
+                <table class="trades-table">
+                    <thead>
+                        <tr>
+                            <th>Account</th>
+                            <th>Pair / Dir</th>
+                            <th>Entry vs Live</th>
+                            <th>Margin Size</th>
+                            <th>Floating P&L</th>
+                            <th>Tier Progress</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="positions-tbody">
+                        <tr><td colspan="7" style="text-align:center; color:var(--text-muted);">Waiting for open positions...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
 
         <div class="main-grid">
             <!-- Spot Trades History Box -->
@@ -187,6 +194,24 @@
     </div>
 
     <script>
+        // Global Force Close handler
+        async function forceCloseTrade(tradeType, tradeId) {
+            const pwd = prompt("Enter Admin Password to execute FORCE CLOSE:");
+            if (!pwd) return;
+            
+            try {
+                const res = await fetch(`/api/trades/close/${tradeType}/${tradeId}`, {
+                    method: 'POST',
+                    headers: { 'X-Admin-Key': pwd }
+                });
+                const data = await res.json();
+                if (data.error) alert("Action Failed: " + data.error);
+                else fetchDashboardData(); // Instantly refresh UI
+            } catch (err) {
+                alert("Network Error during Force Close");
+            }
+        }
+
         async function fetchDashboardData() {
             try {
                 // 1. Status & Gate
@@ -222,7 +247,44 @@
                 document.getElementById('buy-bar').style.width = sentData.buy_pressure;
                 document.getElementById('sell-bar').style.width = sentData.sell_pressure;
 
-                // 5. Spot Trades Table (Compounding scrollbox)
+                // 5. Active Positions & Floating PnL Table
+                const posRes = await fetch('/api/positions');
+                const posData = await posRes.json();
+                const posTbody = document.getElementById('positions-tbody');
+                const selectedAcct = document.getElementById('account-filter').value;
+
+                const filteredPos = posData.filter(p => selectedAcct === "ALL" || p.account.includes(selectedAcct));
+
+                if (filteredPos.length > 0) {
+                    posTbody.innerHTML = filteredPos.map(p => {
+                        const isLong = p.direction === 'LONG';
+                        const isSpot = p.direction === 'SPOT';
+                        const dirClass = isSpot ? 'tag-spot' : (isLong ? 'tag-long' : 'tag-short');
+                        const pnlClass = p.pnl_usdt >= 0 ? 'positive' : 'negative';
+                        
+                        return `
+                            <tr>
+                                <td style="color:var(--text-secondary); font-size:0.8rem;">${p.account}</td>
+                                <td><strong>${p.pair}</strong> <span class="tag-dir ${dirClass}">${p.direction}</span></td>
+                                <td><span style="color:var(--text-muted)">${p.entry}</span><br><strong>${p.live_price}</strong></td>
+                                <td>${p.size}</td>
+                                <td class="stat-value ${pnlClass}" style="font-size:0.9rem;">${p.pnl_formatted}</td>
+                                <td>
+                                    <span class="tp-badge ${p.tp1 ? 'tp-hit' : 'tp-pending'}">TP1 ${p.tp1 ? '✓' : '✗'}</span>
+                                    <span class="tp-badge ${p.tp2 ? 'tp-hit' : 'tp-pending'}">TP2 ${p.tp2 ? '✓' : '✗'}</span>
+                                    <span class="tp-badge tp-pending">TP3 ✗</span>
+                                </td>
+                                <td>
+                                    <button class="btn-force-close" onclick="forceCloseTrade('${p.type}', ${p.id})">Force Close</button>
+                                </td>
+                            </tr>
+                        `;
+                    }).join('');
+                } else {
+                    posTbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:var(--text-muted);">No open positions matching filter</td></tr>`;
+                }
+
+                // 6. Spot Trades Table (Compounding scrollbox)
                 const tradesRes = await fetch('/api/trades?limit=500');
                 const tradesData = await tradesRes.json();
                 const spotTbody = document.getElementById('spot-trades-tbody');
@@ -238,7 +300,7 @@
                     `).join('');
                 }
 
-                // 6. Dedicated Futures Trades Table (Compounding scrollbox)
+                // 7. Dedicated Futures Trades Table (Compounding scrollbox)
                 const futTradesRes = await fetch('/api/futures/trades?limit=500');
                 const futTradesData = await futTradesRes.json();
                 const futTbody = document.getElementById('fut-trades-tbody');
@@ -260,7 +322,7 @@
                     }).join('');
                 }
 
-                // 7. Compounding Logs Box
+                // 8. Compounding Logs Box
                 const logsRes = await fetch('/api/logs?limit=500');
                 const logsData = await logsRes.json();
                 const logsContainer = document.getElementById('logs-container');
@@ -276,13 +338,16 @@
             } catch (err) {
                 console.error("Dashboard poll error:", err);
             } finally {
-                // Queue the next cycle only AFTER this one completely finishes
+                // Wait for cycle to complete before scheduling next pull to prevent deadlock
                 setTimeout(fetchDashboardData, 3000);
             }
         }
 
         // Initialize the first call
         fetchDashboardData();
+
+        // Hook up the account filter refresh
+        document.getElementById('account-filter').addEventListener('change', fetchDashboardData);
     </script>
 </body>
 </html>

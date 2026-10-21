@@ -15,7 +15,7 @@ from futures_engine import run_futures_engine_tick
 
 app = Flask(__name__)
 
-# Silence repetitive Flask access logs to keep your WSL2 terminal clean
+# Silence repetitive Flask access logs to keep your terminal clean
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
@@ -53,7 +53,7 @@ def api_status():
         "api_ok": True,
         "btc_gate_allowed": allowed,
         "btc_gate_reason": reason,
-        "ws_connected": MARKET_STATE["ws_connected"]
+        "ws_connected": MARKET_STATE.get("ws_connected", False)
     })
 
 @app.route("/api/statistics", methods=["GET"])
@@ -114,9 +114,119 @@ def api_futures_statistics():
         "live_withdraw": round(live_withdraw, 2),
     })
 
+# --- NEW: ACTIVE POSITIONS ENDPOINT ---
+@app.route("/api/positions", methods=["GET"])
+def api_positions():
+    spot_open = execute_query(
+        "SELECT id, account_id, pair, entry_price, remaining_qty as qty, tp1_hit, tp2_hit, opened_at FROM spot_trades WHERE status = 'OPEN'",
+        fetch_all=True
+    )
+    fut_open = execute_query(
+        "SELECT id, account_id, pair, direction, entry_price, remaining_margin_usdt as margin, leverage, tp1_hit, tp2_hit, opened_at FROM futures_trades WHERE status = 'OPEN'",
+        fetch_all=True
+    )
+
+    positions = []
+    
+    if spot_open:
+        for t in spot_open:
+            pair = t["pair"]
+            live_price = MARKET_STATE["live_prices"].get(pair, float(t["entry_price"]))
+            entry, qty = float(t["entry_price"]), float(t["qty"])
+            pnl = (live_price - entry) * qty if entry > 0 else 0.0
+            roi_pct = ((live_price - entry) / entry) * 100.0 if entry > 0 else 0.0
+                
+            positions.append({
+                "id": t["id"], "type": "spot", "account": t["account_id"],
+                "pair": pair, "direction": "SPOT", "entry": f"${entry:.5f}",
+                "live_price": f"${live_price:.5f}", "size": f"${(qty * live_price):.2f}",
+                "pnl_usdt": pnl, "roi_pct": roi_pct,
+                "tp1": bool(t["tp1_hit"]), "tp2": bool(t["tp2_hit"])
+            })
+
+    if fut_open:
+        for t in fut_open:
+            pair = t["pair"]
+            live_price = MARKET_STATE["live_prices"].get(pair, float(t["entry_price"]))
+            entry, margin, lev = float(t["entry_price"]), float(t["margin"]), int(t["leverage"])
+            direction = t["direction"]
+            
+            if entry > 0:
+                move_pct = ((live_price - entry) / entry) * 100.0 if direction == "LONG" else ((entry - live_price) / entry) * 100.0
+                roi_pct = move_pct * lev
+                pnl = margin * (roi_pct / 100.0)
+            else:
+                roi_pct = pnl = 0.0
+                
+            positions.append({
+                "id": t["id"], "type": "futures", "account": t["account_id"],
+                "pair": pair, "direction": direction, "entry": f"${entry:.5f}",
+                "live_price": f"${live_price:.5f}", "size": f"${margin:.2f} ({lev}x)",
+                "pnl_usdt": pnl, "roi_pct": roi_pct,
+                "tp1": bool(t["tp1_hit"]), "tp2": bool(t["tp2_hit"])
+            })
+
+    positions.sort(key=lambda x: x["roi_pct"], reverse=True)
+    for p in positions:
+        p["pnl_formatted"] = f"${p['pnl_usdt']:.2f} ({p['roi_pct']:+.2f}%)"
+        
+    return jsonify(positions)
+
+# --- NEW: MANUAL FORCE CLOSE ENDPOINT ---
+@app.route("/api/trades/close/<trade_type>/<int:trade_id>", methods=["POST"])
+def force_close_trade(trade_type, trade_id):
+    admin_key = request.headers.get("X-Admin-Key", "")
+    if admin_key != ADMIN_KEY:
+        return jsonify({"error": "Invalid admin password"}), 403
+
+    now_str = datetime.now(timezone.utc).isoformat()
+    
+    if trade_type == "spot":
+        trade = execute_query("SELECT * FROM spot_trades WHERE id = ? AND status = 'OPEN'", (trade_id,), fetch_one=True)
+        if not trade: return jsonify({"error": "Trade missing"}), 404
+        
+        pair, entry, qty, acct_id = trade["pair"], float(trade["entry_price"]), float(trade["remaining_qty"]), trade["account_id"]
+        live_price = MARKET_STATE["live_prices"].get(pair, entry)
+        
+        sell_notional = qty * live_price
+        gross_profit = sell_notional - (qty * entry)
+        fee_usdt = sell_notional * 0.001
+        net_profit = gross_profit - fee_usdt
+        
+        execute_query(
+            "UPDATE spot_trades SET status = 'CLOSED', exit_price = ?, remaining_qty = 0, profit_usdt = ?, profit_pct = ?, closed_at = ? WHERE id = ?",
+            (live_price, float(trade.get("profit_usdt") or 0.0) + net_profit, ((live_price - entry) / entry) * 100.0, now_str, trade_id), commit=True
+        )
+        execute_query("UPDATE accounts SET spot_balance_usdt = spot_balance_usdt + ? WHERE account_id = ?", (sell_notional - fee_usdt, acct_id), commit=True)
+        add_log("WARNING", "apextick_admin", f"[{acct_id}] FORCE CLOSED Spot {pair} at {live_price}. PnL: ${net_profit:.2f}")
+
+    elif trade_type == "futures":
+        trade = execute_query("SELECT * FROM futures_trades WHERE id = ? AND status = 'OPEN'", (trade_id,), fetch_one=True)
+        if not trade: return jsonify({"error": "Trade missing"}), 404
+        
+        pair, direction, entry, rem_margin, leverage, acct_id = trade["pair"], trade["direction"], float(trade["entry_price"]), float(trade["remaining_margin_usdt"]), int(trade["leverage"]), trade["account_id"]
+        live_price = MARKET_STATE["live_prices"].get(pair, entry)
+        
+        if entry > 0:
+            move_pct = ((live_price - entry) / entry) * 100.0 if direction == "LONG" else ((entry - live_price) / entry) * 100.0
+            roi_pct = move_pct * leverage
+        else:
+            roi_pct = 0.0
+            
+        notional_closed = rem_margin * leverage
+        net_loss = (rem_margin * (roi_pct / 100.0)) - (notional_closed * 0.0005)
+        
+        execute_query(
+            "UPDATE futures_trades SET status = 'CLOSED', exit_price = ?, remaining_margin_usdt = 0, pnl_usdt = ?, pnl_pct = ?, close_type = 'FORCE CLOSE', closed_at = ? WHERE id = ?",
+            (live_price, float(trade.get("pnl_usdt") or 0.0) + net_loss, roi_pct, now_str, trade_id), commit=True
+        )
+        execute_query("UPDATE accounts SET futures_balance_usdt = futures_balance_usdt + ? WHERE account_id = ?", (max(0.0, rem_margin + net_loss), acct_id), commit=True)
+        add_log("WARNING", "apextick_admin", f"[{acct_id}] FORCE CLOSED Futures {pair} {direction} at {live_price}. PnL: ${net_loss:.2f}")
+        
+    return jsonify({"status": "success"})
+
 @app.route("/api/trades", methods=["GET"])
 def api_trades():
-    # Increased limit to 500 for compounding scrollbox support
     limit = int(request.args.get("limit", 500))
     trades = execute_query(
         "SELECT pair, entry_price, exit_price, profit_usdt, profit_pct, opened_at FROM spot_trades WHERE status = 'CLOSED' ORDER BY id DESC LIMIT ?",
@@ -138,7 +248,6 @@ def api_trades():
 
 @app.route("/api/futures/trades", methods=["GET"])
 def api_futures_trades():
-    """Dedicated endpoint for the new Futures Closes table with compounding history."""
     limit = int(request.args.get("limit", 500))
     trades = execute_query(
         """
@@ -169,7 +278,6 @@ def api_futures_trades():
 
 @app.route("/api/logs", methods=["GET"])
 def api_logs():
-    # Increased limit to 500 for compounding logs scrollbox support
     limit = int(request.args.get("limit", 500))
     logs = execute_query(
         "SELECT timestamp, level, source, message FROM system_logs ORDER BY id DESC LIMIT ?",
@@ -191,7 +299,7 @@ def api_btc_sentiment():
 
 @app.route("/api/wallet", methods=["GET"])
 def api_wallet():
-    return jsonify({"wallet": "ApexTick Secure Multi-Account Node (WSL2)"})
+    return jsonify({"wallet": "ApexTick Secure Multi-Account Node"})
 
 @app.route("/api/bot/btc-config", methods=["GET"])
 def api_get_btc_config():
@@ -212,10 +320,6 @@ def api_set_btc_config():
     )
     add_log("INFO", "apextick_admin", f"BTC decline signal toggled to: {'ON' if enabled_val == '1' else 'OFF'}")
     return jsonify({"btc_decline_signal_enabled": enabled_val == "1"})
-
-# if __name__ == "__main__":
-#     start_background_services()
-#     app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)
 
 if __name__ == '__main__':
     start_background_services()
