@@ -1,15 +1,17 @@
 import math
-import random
+import time
 from datetime import datetime, timezone
 import pandas as pd
-from config import FUTURES_CONFIG
+import ccxt
+
+from config import FUTURES_CONFIG, MARKET_SCANNER_CONFIG
 from database import execute_query, add_log
 from btc_decline_signal import is_trading_allowed_by_btc_gate, MARKET_STATE
 
 # =============================================================================
 # CONSTANTS & CONFIGURATION
 # =============================================================================
-FUTURES_ENTRY_COOLDOWN_SECONDS = 180  # Cooldown between new entries per account
+FUTURES_ENTRY_COOLDOWN_SECONDS = 600  # Cooldown between new entries per account
 STALE_PRICE_THRESHOLD_SECONDS = 300   # Max allowed age for a fallback price
 
 
@@ -52,17 +54,14 @@ def calculate_futures_macro_trend() -> str:
     if len(klines) < 21:
         return "NEUTRAL"
 
-    # Extract valid closing prices
     closes = [float(k["c"]) for k in klines if float(k.get("c", 0)) > 0]
     if len(closes) < 21:
         return "NEUTRAL"
 
-    # Compute Exponential Moving Averages
     series = pd.Series(closes)
     ema_9 = float(series.ewm(span=9, adjust=False).mean().iloc[-1])
     ema_21 = float(series.ewm(span=21, adjust=False).mean().iloc[-1])
 
-    # Determine Trend Alignment
     if ema_9 > ema_21:
         return "BULLISH"
     elif ema_9 < ema_21:
@@ -83,7 +82,6 @@ def is_account_on_futures_cooldown(account_id: str) -> tuple[bool, int]:
     )
     
     if not last_trade or not last_trade.get("opened_at"):
-        # Fall back to checking any recent open record
         last_trade = execute_query(
             "SELECT opened_at FROM futures_trades WHERE account_id = ? ORDER BY id DESC LIMIT 1",
             (account_id,),
@@ -109,6 +107,61 @@ def is_account_on_futures_cooldown(account_id: str) -> tuple[bool, int]:
     return False, 0
 
 
+def check_micro_structure(pair: str, current_price: float) -> tuple[bool, str]:
+    """
+    THE SNIPER TRIGGER: Evaluates real-time order-flow footprint.
+    Calculates 5-minute VWAP and detects institutional volume anomalies.
+    """
+    try:
+        # Spin up a lightweight client strictly for pulling order-flow micro-data
+        exchange = ccxt.binance({'enableRateLimit': True, 'timeout': 5000})
+        ohlcv = exchange.fetch_ohlcv(pair, timeframe='5m', limit=24) # ~2 hours of data
+        
+        if not ohlcv or len(ohlcv) < 20:
+            return False, "Insufficient 5m order-flow data"
+
+        # Calculate VWAP (Volume Weighted Average Price)
+        cumulative_vp = 0.0
+        cumulative_vol = 0.0
+        volumes = []
+
+        # Exclude the actively forming candle for the baseline average
+        for k in ohlcv[:-1]: 
+            high, low, close, vol = float(k[2]), float(k[3]), float(k[4]), float(k[5])
+            typical_price = (high + low + close) / 3.0
+            cumulative_vp += (typical_price * vol)
+            cumulative_vol += vol
+            volumes.append(vol)
+
+        if cumulative_vol == 0:
+            return False, "Zero volume baseline"
+
+        vwap = cumulative_vp / cumulative_vol
+        avg_vol = sum(volumes) / len(volumes)
+
+        # Evaluate the last 2 candles for volume spikes (catching the active or immediate post-breakout)
+        recent_vol = max(float(ohlcv[-1][5]), float(ohlcv[-2][5]))
+        vol_multiplier = recent_vol / avg_vol if avg_vol > 0 else 0
+
+        # Import Sniper rules from Config
+        vwap_tol = MARKET_SCANNER_CONFIG.get("vwap_tolerance_pct", 0.5)
+        req_vol_mult = MARKET_SCANNER_CONFIG.get("volume_spike_multiplier", 3.0)
+
+        # Distance to VWAP
+        dist_pct = (abs(current_price - vwap) / vwap) * 100.0
+
+        if dist_pct > vwap_tol:
+            return False, f"Price {dist_pct:.2f}% away from VWAP (Needs <= {vwap_tol}%)"
+        
+        if vol_multiplier < req_vol_mult:
+            return False, f"Volume only {vol_multiplier:.1f}x (Needs >= {req_vol_mult}x)"
+
+        return True, f"VWAP Tap ({dist_pct:.2f}% dist) + Whale Volume ({vol_multiplier:.1f}x)"
+        
+    except Exception as e:
+        return False, f"Micro-structure API error: {e}"
+
+
 # =============================================================================
 # MAIN EXECUTION ENGINE
 # =============================================================================
@@ -117,15 +170,11 @@ def run_futures_engine_tick() -> str:
     """
     Master loop for the Live Paper Trading Futures Engine.
     Executes a complete evaluation cycle across all active accounts and pairs.
-    
-    Phase 1: Position Management (Instant TP Logging, Outlier Trailing, Stop Loss, Trailing Recovery)
-    Phase 2: Market Scanning & New Trade Execution (Excluding BTC/ETH/BNB)
     """
-    
-    # Fetch actively supported futures pairs sorted by 24h volume
+    # 1. Fetch the Dynamic Hot List (Top 50 Explosive Coins)
     pairs = execute_query(
         """
-        SELECT pair, last_price, volume_24h_usd 
+        SELECT pair, last_price, volume_24h_usd, change_24h_pct
         FROM trading_pairs 
         WHERE status = 'ACTIVE' AND futures_supported = 1 
         ORDER BY volume_24h_usd DESC
@@ -133,9 +182,8 @@ def run_futures_engine_tick() -> str:
         fetch_all=True
     )
     if not pairs:
-        return "Execution halted: No active Futures pairs available in database."
+        return "Execution halted: No active Futures pairs available in dynamic hot list."
 
-    # Fetch all user accounts with Futures trading enabled
     accounts = execute_query(
         "SELECT * FROM accounts WHERE futures_enabled = 1", 
         fetch_all=True
@@ -185,7 +233,6 @@ def run_futures_engine_tick() -> str:
 
             roi_pct = price_diff_pct * leverage
 
-            # Update historical peak and worst performance trackers
             peak_roi = max(float(trade.get("peak_roi_pct") or 0.0), roi_pct)
             worst_roi = min(float(trade.get("worst_roi_pct") or 0.0), roi_pct)
             
@@ -217,7 +264,6 @@ def run_futures_engine_tick() -> str:
                 new_rem_margin = rem_margin - margin_to_close
                 total_trade_pnl = accumulated_pnl + net_partial_pnl
 
-                # 1. Insert distinct closed event into history table immediately
                 execute_query(
                     """
                     INSERT INTO futures_trades (
@@ -236,14 +282,12 @@ def run_futures_engine_tick() -> str:
                     commit=True
                 )
 
-                # 2. Update remaining active bag on parent record
                 execute_query(
                     "UPDATE futures_trades SET remaining_margin_usdt = ?, pnl_usdt = ?, pnl_pct = ?, tp1_hit = 1 WHERE id = ?",
                     (new_rem_margin, total_trade_pnl, roi_pct, trade_id),
                     commit=True
                 )
 
-                # 3. Credit wallet balance and 70% live withdraw pool
                 balance += (margin_to_close + net_partial_pnl)
                 withdraw_pool_add = net_partial_pnl * FUTURES_CONFIG["withdraw_split_pct"] if net_partial_pnl > 0 else 0.0
                 execute_query(
@@ -272,7 +316,6 @@ def run_futures_engine_tick() -> str:
                 new_rem_margin = rem_margin - margin_to_close
                 total_trade_pnl = accumulated_pnl + net_partial_pnl
 
-                # 1. Insert distinct closed event into history table immediately
                 execute_query(
                     """
                     INSERT INTO futures_trades (
@@ -291,14 +334,12 @@ def run_futures_engine_tick() -> str:
                     commit=True
                 )
 
-                # 2. Update remaining active bag on parent record
                 execute_query(
                     "UPDATE futures_trades SET remaining_margin_usdt = ?, pnl_usdt = ?, pnl_pct = ?, tp2_hit = 1 WHERE id = ?",
                     (new_rem_margin, total_trade_pnl, roi_pct, trade_id),
                     commit=True
                 )
 
-                # 3. Credit wallet balance and 70% live withdraw pool
                 balance += (margin_to_close + net_partial_pnl)
                 withdraw_pool_add = net_partial_pnl * FUTURES_CONFIG["withdraw_split_pct"] if net_partial_pnl > 0 else 0.0
                 execute_query(
@@ -386,7 +427,6 @@ def run_futures_engine_tick() -> str:
                 )
                 continue
 
-            # Process the exit transaction if any risk cut was triggered
             if risk_exit_type:
                 notional_closed = rem_margin * leverage
                 gross_loss = rem_margin * (roi_pct / 100.0)
@@ -405,7 +445,6 @@ def run_futures_engine_tick() -> str:
                     commit=True
                 )
 
-                # Return remaining healthy margin to balance (deducting the loss)
                 balance += max(0.0, rem_margin + net_loss)
                 execute_query(
                     "UPDATE accounts SET futures_balance_usdt = ? WHERE account_id = ?",
@@ -420,7 +459,7 @@ def run_futures_engine_tick() -> str:
 
 
     # -------------------------------------------------------------------------
-    # PHASE 2: EVALUATE NEW ENTRIES (MARKET SCANNING & PAPER EXECUTION)
+    # PHASE 2: EVALUATE NEW ENTRIES (DOUBLE HANDSHAKE + ORDER FLOW SNIPER)
     # -------------------------------------------------------------------------
     
     # 1. Macro Gate Check
@@ -428,45 +467,40 @@ def run_futures_engine_tick() -> str:
     if not allowed:
         return " | ".join(activity_summary) if activity_summary else f"Futures entries paused: BTC Gate BLOCK ({gate_reason})"
 
-    # 2. Trend & Order Flow Assessment
+    # 2. Macro Trend Alignment (Handshake Part 1)
     btc_trend = calculate_futures_macro_trend()
     buy_pressure = float(MARKET_STATE.get("buy_pressure_pct", 50.0))
     sell_pressure = float(MARKET_STATE.get("sell_pressure_pct", 50.0))
 
     target_direction = None
     
-    # Strict alignment rules for strong trends
     if btc_trend == "BULLISH" and buy_pressure >= 51.0: 
         target_direction = "LONG"
     elif btc_trend == "BEARISH" and sell_pressure >= 51.0: 
         target_direction = "SHORT"
-        
-    # Sideways market scalping logic
     elif btc_trend == "NEUTRAL":
-        if buy_pressure >= 55.0: 
-            target_direction = "LONG"
-        elif sell_pressure >= 55.0: 
-            target_direction = "SHORT"
+        if buy_pressure >= 55.0: target_direction = "LONG"
+        elif sell_pressure >= 55.0: target_direction = "SHORT"
 
     if not target_direction:
         return " | ".join(activity_summary) if activity_summary else "Futures Brain: Waiting for trend and volume alignment."
+
+    # Load Dynamic Scanner thresholds
+    min_mom = MARKET_SCANNER_CONFIG.get("min_momentum_pct", 3.0)
+    max_ext = MARKET_SCANNER_CONFIG.get("max_overextended_pct", 25.0)
 
     # 3. Account-Level Execution
     for acct in accounts:
         acct_id = acct["account_id"]
         
-        # Pull fresh account state to ensure accurate balance
         fresh_acct = execute_query(
             "SELECT * FROM accounts WHERE account_id = ?", 
-            (acct_id,), 
-            fetch_one=True
+            (acct_id,), fetch_one=True
         )
         balance = float(fresh_acct["futures_balance_usdt"] or 0.0)
         capital_cap = float(fresh_acct.get("futures_capital_cap") or 999999.0)
-        
         available_margin = min(balance, capital_cap)
 
-        # Ensure account meets minimum requirements and isn't spamming trades
         if available_margin < FUTURES_CONFIG["min_margin_usdt"]:
             continue
             
@@ -474,42 +508,53 @@ def run_futures_engine_tick() -> str:
         if on_cooldown:
             continue
 
-        # Check Max Positions Limit
         open_positions = execute_query(
             "SELECT pair FROM futures_trades WHERE account_id = ? AND status = 'OPEN'",
-            (acct_id,), 
-            fetch_all=True
+            (acct_id,), fetch_all=True
         )
         if len(open_positions) >= FUTURES_CONFIG["max_open_positions"]:
             continue
             
         held_pairs = {p["pair"] for p in open_positions}
 
-        # Calculate exact margin size based on configured percentage
         target_margin_usdt = available_margin * (FUTURES_CONFIG["margin_size_pct"] / 100.0)
         margin_usdt = max(target_margin_usdt, FUTURES_CONFIG["min_margin_usdt"])
         margin_usdt = min(margin_usdt, available_margin)
 
-        # 4. Pair Selection & Virtual Ledger Execution (Excluding Big 3)
+        # 4. Pair Selection (Handshake Part 2: Micro Momentum & Order-Flow)
         for p_info in pairs:
             pair = p_info["pair"]
+            chg_24h = float(p_info.get("change_24h_pct") or 0.0)
             
             # --- STRICT BAN ON THE BIG 3 (Forces high-volume altcoin scalping) ---
             if pair in ["BTC/USDT", "ETH/USDT", "BNB/USDT"]:
                 continue
             
-            # Prevent opening duplicate positions on the same coin
             if pair in held_pairs:
                 continue
+
+            # --- DOUBLE HANDSHAKE: Relative Strength & Exhaustion Filters ---
+            if target_direction == "LONG":
+                # Ensure the asset has momentum but isn't overbought
+                if not (min_mom <= chg_24h <= max_ext):
+                    continue
+            elif target_direction == "SHORT":
+                # Ensure the asset is actively bleeding but hasn't bottomed out
+                if not (-max_ext <= chg_24h <= -min_mom):
+                    continue
 
             entry_price = get_live_price_safely(pair)
             if entry_price <= 0:
                 continue
 
+            # --- THE SNIPER TRIGGER (VWAP & Volume Anomaly) ---
+            passed_micro, micro_reason = check_micro_structure(pair, entry_price)
+            if not passed_micro:
+                continue
+
             notional_value = margin_usdt * FUTURES_CONFIG["leverage"]
             open_time = datetime.now(timezone.utc).isoformat()
             
-            # Execute Paper Trade Insertion
             execute_query(
                 """
                 INSERT INTO futures_trades (
@@ -525,7 +570,6 @@ def run_futures_engine_tick() -> str:
                 commit=True
             )
             
-            # Deduct margin from active balance
             new_balance = balance - margin_usdt
             execute_query(
                 "UPDATE accounts SET futures_balance_usdt = ? WHERE account_id = ?", 
@@ -535,13 +579,12 @@ def run_futures_engine_tick() -> str:
             
             msg = (
                 f"[{fresh_acct['display_name']}] FUTURES PAPER ENTRY: Opened {target_direction} "
-                f"on {pair} at ${entry_price:,.4f} (Margin: ${margin_usdt:.2f} @ {FUTURES_CONFIG['leverage']}x) | "
-                f"Trend: {btc_trend}"
+                f"on {pair} at ${entry_price:,.4f} (Margin: ${margin_usdt:.2f} @ {FUTURES_CONFIG['leverage']}x)\n"
+                f"🧠 Sniper Logic: {micro_reason} | Macro Trend: {btc_trend}"
             )
             add_log("INFO", "apextick_bot", msg)
             activity_summary.append(msg)
             
-            # Only open one trade per account per tick to respect cooldowns
             break 
 
     return " | ".join(activity_summary) if activity_summary else "Futures engine ticked: Monitoring active positions."

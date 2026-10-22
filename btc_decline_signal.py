@@ -5,7 +5,9 @@ import ssl
 import ccxt
 import websocket
 from datetime import datetime, timezone
-from config import BTC_GATE_CONFIG, WATCHLIST_PAIRS
+
+# IMPORT THE NEW DYNAMIC CONFIG
+from config import BTC_GATE_CONFIG, MARKET_SCANNER_CONFIG
 from database import execute_query, IS_POSTGRES, add_log
 
 EXCLUDED_BASES = {
@@ -52,11 +54,20 @@ def ensure_pairs_table():
         commit=True
     )
 
-def sync_binance_pairs(min_vol_usd: float = 5_000_000, max_pairs: int = 120):
+def sync_binance_pairs():
+    """
+    THE GLOBAL NET:
+    Pings all active Binance USDT markets, filters for institutional liquidity, 
+    and ranks the top volatile coins dynamically.
+    """
     ensure_pairs_table()
     now_str = datetime.now(timezone.utc).isoformat()
+    
+    # Load parameters from the new Dynamic Scanner Config
+    min_vol_usd = MARKET_SCANNER_CONFIG.get("min_24h_volume_usdt", 10_000_000)
+    max_pairs = MARKET_SCANNER_CONFIG.get("top_n_coins", 50)
+    
     candidates = {}
-    network_blocked = False
 
     try:
         exchange = ccxt.binance({'enableRateLimit': True, 'timeout': 10000})
@@ -66,6 +77,7 @@ def sync_binance_pairs(min_vol_usd: float = 5_000_000, max_pairs: int = 120):
         for symbol, market in markets.items():
             if not market.get('quote') == 'USDT' or not market.get('active'):
                 continue
+            
             base = market.get('base')
             if base in EXCLUDED_BASES or base.endswith(('UP', 'DOWN', 'BULL', 'BEAR')):
                 continue
@@ -79,6 +91,7 @@ def sync_binance_pairs(min_vol_usd: float = 5_000_000, max_pairs: int = 120):
             chg_24 = float(ticker_info.get('percentage', 0) or 0)
             vol_24 = float(ticker_info.get('quoteVolume', 0) or 0)
             
+            # --- BTC MACRO GATE TRACKING ---
             if pair_str == "BTC/USDT":
                 MARKET_STATE["btc_price"] = last_p if last_p > 0 else MARKET_STATE["btc_price"]
                 MARKET_STATE["btc_24h_change"] = chg_24
@@ -91,40 +104,51 @@ def sync_binance_pairs(min_vol_usd: float = 5_000_000, max_pairs: int = 120):
                     MARKET_STATE["btc_sentiment"] = "NEUTRAL"
                 continue
 
-            if pair_str in WATCHLIST_PAIRS or (vol_24 >= min_vol_usd and last_p > 0):
+            # --- DYNAMIC LIQUIDITY FILTER ---
+            if vol_24 >= min_vol_usd and last_p > 0:
                 candidates[pair_str] = {
                     "pair": pair_str, "spot": is_spot, "futures": is_fut,
                     "chg": chg_24, "vol": vol_24, "price": last_p,
                 }
+                
     except Exception as e:
-        network_blocked = True
-        add_log("INFO", "apextick_bot", "Binance REST API blocked by region. Initializing offline watchlist mode.")
+        add_log("WARNING", "apextick_bot", f"Scanner API Blocked or Timeout. Retaining current Hot List. ({e})")
+        return 0
 
-    for pair_str in WATCHLIST_PAIRS:
-        if pair_str not in candidates:
-            candidates[pair_str] = {
-                "pair": pair_str, "spot": 1, "futures": 1, 
-                "chg": 0.0, "vol": 20_000_000.0, "price": 1.0
-            }
+    # Sort strictly by 24h Volume (Highest Liquidity First) and cap at Top N
+    sorted_pairs = sorted(candidates.values(), key=lambda x: x["vol"], reverse=True)[:max_pairs]
+    
+    if not sorted_pairs:
+        return 0
 
-    sorted_pairs = sorted(candidates.values(), key=lambda x: (x["pair"] in WATCHLIST_PAIRS, x["vol"]), reverse=True)[:max_pairs]
+    # Clean Slate: Deactivate all old pairs, we only want the explosive ones active
+    execute_query("UPDATE trading_pairs SET status = 'INACTIVE'", commit=True)
+    
     added_count = 0
-
     for p in sorted_pairs:
         existing = execute_query("SELECT id FROM trading_pairs WHERE pair = ?", (p["pair"],), fetch_one=True)
         if existing:
             execute_query(
-                "UPDATE trading_pairs SET spot_supported = ?, futures_supported = ?, change_24h_pct = ?, volume_24h_usd = ?, last_price = ?, updated_at = ? WHERE pair = ?",
+                """
+                UPDATE trading_pairs 
+                SET status = 'ACTIVE', spot_supported = ?, futures_supported = ?, 
+                    change_24h_pct = ?, volume_24h_usd = ?, last_price = ?, updated_at = ? 
+                WHERE pair = ?
+                """,
                 (p["spot"], p["futures"], p["chg"], p["vol"], p["price"], now_str, p["pair"]), commit=True
             )
         else:
             execute_query(
-                "INSERT INTO trading_pairs (pair, status, spot_supported, futures_supported, change_24h_pct, volume_24h_usd, last_price, reason, updated_at) VALUES (?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?)",
-                (p["pair"], p["spot"], p["futures"], p["chg"], p["vol"], p["price"], "Core Watchlist" if network_blocked else "Auto-Scanner Top Volume", now_str), commit=True
+                """
+                INSERT INTO trading_pairs 
+                (pair, status, spot_supported, futures_supported, change_24h_pct, volume_24h_usd, last_price, reason, updated_at) 
+                VALUES (?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (p["pair"], p["spot"], p["futures"], p["chg"], p["vol"], p["price"], "Dynamic Hot List Scan", now_str), commit=True
             )
-            added_count += 1
+        added_count += 1
 
-    add_log("INFO", "apextick_bot", f"Synced {len(sorted_pairs)} trading pairs into database ({added_count} new).")
+    add_log("INFO", "apextick_bot", f"Market Scan Complete: Tracked Top {len(sorted_pairs)} Liquid Pairs.")
     return len(sorted_pairs)
 
 def eval_decline_from_closes() -> dict:
@@ -189,9 +213,6 @@ def backfill_btc_history():
         base_p = MARKET_STATE["btc_price"]
         now_t = int(time.time() * 1000)
         MARKET_STATE["klines_1h"] = [{"t": now_t - (i * 3600 * 1000), "o": base_p, "c": base_p, "v": 1500.0} for i in range(40, 0, -1)]
-
-def build_btc_24h_range_reports():
-    pass
 
 def _recalc_pressure():
     now_ms = int(time.time() * 1000)
@@ -266,7 +287,6 @@ def start_btc_stream_background():
             time.sleep(5)
 
     def db_price_sync_loop():
-        # IMMEDIATELY fetch prices on boot to prevent the $1.00 glitch
         rest_exchange = ccxt.binance({'enableRateLimit': True, 'timeout': 10000})
         try:
             tickers = rest_exchange.fetch_tickers()
@@ -281,7 +301,6 @@ def start_btc_stream_background():
         except Exception:
             pass
 
-        # Now wait the 15 seconds for WebSockets to attempt connection
         time.sleep(15)
         
         if not MARKET_STATE["ws_connected"]:
@@ -294,7 +313,6 @@ def start_btc_stream_background():
                 if not active_pairs:
                     continue
                 
-                # NUKED THE SIMULATOR. IF WEBSOCKETS FAIL, PULL REAL PRICES FROM REST API
                 if not MARKET_STATE["ws_connected"]:
                     try:
                         tickers = rest_exchange.fetch_tickers()
@@ -311,7 +329,6 @@ def start_btc_stream_background():
                                     (last_p, chg, pair), commit=True
                                 )
                         
-                        # Real-Time REST Pull for BTC Buy/Sell Pressure
                         trades = rest_exchange.fetch_trades('BTC/USDT', limit=50)
                         buy_n = sum(t['amount'] * t['price'] for t in trades if t['side'] == 'buy')
                         sell_n = sum(t['amount'] * t['price'] for t in trades if t['side'] == 'sell')
@@ -322,10 +339,9 @@ def start_btc_stream_background():
                             MARKET_STATE["buy_pressure_pct"] = round(buy_pct, 1)
                             MARKET_STATE["sell_pressure_pct"] = round(100.0 - buy_pct, 1)
                             
-                    except Exception as rest_e:
+                    except Exception:
                         pass
                 else:
-                    # NORMAL WEBSOCKET OPERATION
                     for p_row in active_pairs:
                         pair = p_row["pair"]
                         live_price = MARKET_STATE["live_prices"].get(pair)
@@ -336,17 +352,30 @@ def start_btc_stream_background():
                                 "UPDATE trading_pairs SET last_price = ?, change_24h_pct = ? WHERE pair = ?",
                                 (live_price, live_chg or 0.0, pair), commit=True
                             )
-            except Exception as e:
+            except Exception:
                 pass
+
+    # --- THE DYNAMIC SCANNER LOOP ---
+    def dynamic_scanner_loop():
+        interval = MARKET_SCANNER_CONFIG.get("refresh_interval_minutes", 5) * 60
+        while True:
+            try:
+                sync_binance_pairs()
+            except Exception as e:
+                add_log("ERROR", "apextick_bot", f"Scanner Loop Error: {e}")
+            time.sleep(interval)
 
     threading.Thread(target=ws_btc_loop, daemon=True).start()
     threading.Thread(target=ws_ticker_loop, daemon=True).start()
     threading.Thread(target=db_price_sync_loop, daemon=True).start()
+    threading.Thread(target=dynamic_scanner_loop, daemon=True).start() # Added the background scanner thread
 
 if __name__ == "__main__":
     print("Initializing Core Systems...")
     backfill_btc_history()
+    # Run the scanner immediately on boot to build the first Hot List
+    sync_binance_pairs() 
     start_btc_stream_background()
-    print("WebSocket streams connected. Live prices syncing to database engine.")
+    print("Dynamic Market Scanner and WebSockets connected. Live prices syncing.")
     while True:
         time.sleep(1)

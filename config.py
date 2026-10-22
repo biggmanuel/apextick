@@ -3,6 +3,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 import ccxt
 
+# ==============================================================================
+# APEXTICK: INSTITUTIONAL SCALPING & ACCUMULATION ENGINE
+# ==============================================================================
+
 # --- ENVIRONMENT SETUP ---
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(dotenv_path=BASE_DIR / ".env")
@@ -31,7 +35,7 @@ exchange = ccxt.binance({
     },
 })
 
-# Configure endpoints for the unified Binance Demo / Mock Trading environment[cite: 10]
+# Configure endpoints for the unified Binance Demo / Mock Trading environment
 exchange.urls["api"] = {
     "public": "https://demo-api.binance.com/api/v3",
     "private": "https://demo-api.binance.com/api/v3",
@@ -40,73 +44,79 @@ exchange.urls["api"] = {
     "fapiPrivate": "https://testnet.binancefuture.com/fapi/v1",
 }
 
-# --- SPOT TRADING ENGINE CONFIGURATION ---
+# --- SPOT TRADING ENGINE CONFIGURATION (The Accumulator) ---
 SPOT_CONFIG = {
-    "capital_cap_usdt": 250.0,
-    "trade_size_pct": 5.0,           # 5% of available capital per entry (~$12.50)[cite: 10]
-    "min_trade_usdt": 10.0,
+    "capital_cap_usdt": 100.0,
+    "trade_size_pct": 18.0,          # 18% of $100 = $18.00 per entry
+    "min_trade_usdt": 17.0,          # Guarantees 30% TP1 scale-out >= $5.10
     "max_open_positions": 5,
-    "fee_pct": 0.1,                  # Binance standard spot fee[cite: 10]
-    "tp1_pct": 2.0,                  # +2.0% price gain -> scale out 30%[cite: 10]
-    "tp2_pct": 4.0,                  # +4.0% price gain -> scale out 40%[cite: 10]
-    "tp3_pct": 6.0,                  # +6.0% price gain -> close remaining bag[cite: 10]
+    "fee_pct": 0.1,                  
+    "tp1_pct": 2.0,                  
+    "tp2_pct": 4.0,                  
+    "tp3_pct": 6.0,                  
     "tp1_close_ratio": 0.30,
     "tp2_close_ratio": 0.40,
-    "never_close_below_tp": True,    # Bag-hold strategy on spot[cite: 10]
+    "never_close_below_tp": True,    # Forces reliance on exact Demand Zone/VWAP entries
 }
 
-# --- USDT-M FUTURES TRADING ENGINE CONFIGURATION ---
+# --- USDT-M FUTURES TRADING ENGINE CONFIGURATION (The Sniper) ---
 FUTURES_CONFIG = {
     "leverage": 15,
-    "margin_size_pct": 4.0,          # 4% margin per position[cite: 10]
-    "min_margin_usdt": 0.85,
-    "max_open_positions": 5,         # Expanded to 5 active slots 
-    "fee_pct": 0.05,                 # Taker fee estimate[cite: 10]
-    "withdraw_split_pct": 0.70,      # 70% of realized profits to Live Withdraw Pool[cite: 10]
+    "margin_size_pct": 10.0,         # 10% of $50 = $5.00 margin per position
+    "min_margin_usdt": 3.0,
+    "max_open_positions": 5,         
+    "fee_pct": 0.05,                 
+    "withdraw_split_pct": 0.70,      
     
-    # Tiered Take-Profit targets (ROI on margin @ 15x leverage)[cite: 10]
-    "tp1_roi": 20.0,                 # +20.0% ROI -> scale out 30%[cite: 10]
-    "tp2_roi": 50.0,                 # +50.0% ROI -> scale out 40%[cite: 10]
+    # Tiered Scale-Outs
+    "tp1_roi": 20.0,                 
+    "tp2_roi": 50.0,                 
     "tp1_close_ratio": 0.30,
     "tp2_close_ratio": 0.40,
+
+    # Outlier Runner Engine
+    "outlier_arm_roi": 80.0,         
+    "outlier_trail_buffer_pct": 25.0, 
+    "hard_tp3_cap_roi": 400.0,       
     
-    # Outlier Runner Engine (Final 30% Bag)
-    "outlier_arm_roi": 80.0,         # Arms trailing runner mode once past +80% ROI 
-    "outlier_trail_buffer_pct": 25.0, # Closes only if ROI pulls back 25% from peak 
-    "hard_tp3_cap_roi": 400.0,       # Absolute ceiling cap if trend never pulls back 
-    
-    # Widened risk parameters to absorb standard market chop[cite: 10]
-    "candle_sl_roi_pct": -45.0,      # Relaxed minor cut[cite: 10]
-    "hard_sl_roi_pct": -75.0,        # Maximum structural cut[cite: 10]
-    "recovery_arm_roi_pct": -30.0,   # Trigger recovery trailing mode[cite: 10]
-    "recovery_tp_roi_pct": 5.0,      # Exit recovery trades at breakeven/small gain[cite: 10]
+    # Strict Micro-Risk Limits
+    "candle_sl_roi_pct": -5.0,       
+    "hard_sl_roi_pct": -15.0,        
+    "recovery_arm_roi_pct": -8.0,    
+    "recovery_tp_roi_pct": 0.50,     
 }
 
-# --- BTC MACRO GATE SETTINGS ---
+# --- BTC MACRO GATE SETTINGS (The 1H Trend Bias) ---
 BTC_GATE_CONFIG = {
     "enabled": True,
     "min_buy_pressure_pct": 45.0,
     "max_sell_pressure_pct": 65.0,
     
-    # Required by btc_decline_signal.py eval_decline_from_closes()[cite: 10]
-    "min_bars": 5,           # Minimum klines required to evaluate[cite: 10]
-    "baseline_bars": 24,     # Baseline lookback window[cite: 10]
-    "tail": 5,               # Recent candles to evaluate for volume[cite: 10]
-    "vol_mult": 1.5,         # Multiplier to detect volume spikes[cite: 10]
-    "red_look": 5,           # Number of recent candles to inspect[cite: 10]
-    "red_need": 3,           # Number of red candles needed to trigger soft decline[cite: 10]
-    "nuclear_4h": -8.0,      # Trigger block if 4h drop exceeds this %[cite: 10]
-    "soft_4h": -4.0,         # Soft 4h drop threshold[cite: 10]
-    "soft_1h": -2.0,         # Soft 1h drop threshold[cite: 10]
+    # Required by btc_decline_signal.py eval_decline_from_closes()
+    "min_bars": 5,           # Minimum klines required to evaluate
+    "baseline_bars": 24,     # Baseline lookback window
+    "tail": 5,               # Recent candles to evaluate for volume
+    "vol_mult": 1.5,         # Multiplier to detect volume spikes
+    "red_look": 5,           # Number of recent candles to inspect
+    "red_need": 3,           # Number of red candles needed to trigger soft decline
+    "nuclear_4h": -8.0,      # Trigger block if 4h drop exceeds this %
+    "soft_4h": -4.0,         # Soft 4h drop threshold
+    "soft_1h": -2.0,         # Soft 1h drop threshold
     
-    # Required by btc_decline_signal.py _recalc_pressure()[cite: 10]
-    "window_ms": 60000       # Rolling 60-second window for buy/sell pressure[cite: 10]
+    # Required by btc_decline_signal.py _recalc_pressure()
+    "window_ms": 60000       # Rolling 60-second window for buy/sell pressure
 }
 
-# --- MARKET SCANNER SETTINGS ---
-WATCHLIST_PAIRS = [
-    "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT",
-    "ADA/USDT", "DOGE/USDT", "TRX/USDT", "DOT/USDT", "POL/USDT",
-    "LTC/USDT", "BCH/USDT", "AVAX/USDT", "LINK/USDT", "XLM/USDT",
-    "ATOM/USDT", "UNI/USDT", "XMR/USDT", "ETC/USDT", "FIL/USDT"
-]
+# --- DYNAMIC MARKET SCANNER SETTINGS (Replaces Hard-Coded Watchlist) ---
+MARKET_SCANNER_CONFIG = {
+    "enabled": True,
+    "refresh_interval_minutes": 5,       # Pings Binance exchange-wide every 5m to rebuild the Hot List
+    "min_24h_volume_usdt": 10_000_000,   # Institutional Liquidity Filter: Ignore dead/illiquid coins
+    "top_n_coins": 50,                   # The ultimate pool size of active, high-volume pairs to track in the DB
+    
+    # Order-Flow / Volatility Micro-Triggers
+    "min_momentum_pct": 3.0,             # Minimum daily % move to prove active market participation
+    "max_overextended_pct": 25.0,        # Mean Reversion: Ignore coins already up/down > 25% to avoid tops/bottoms
+    "vwap_tolerance_pct": 0.5,           # Sniper Trigger: Entry must occur within 0.5% of the VWAP / Demand Zone
+    "volume_spike_multiplier": 3.0,      # Whale Wake: 1m/5m volume must be 3x the rolling average to confirm breakout/bounce
+}
