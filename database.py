@@ -56,7 +56,7 @@ def execute_query(query: str, params: tuple = (), fetch_one: bool = False, fetch
 def init_db():
     """
     Initializes the database schema. 
-    Upgraded to support peak/worst ROI tracking and dynamic pair volumes.
+    Upgraded to support peak/worst ROI tracking, dynamic pair volumes, and LIVE/PAPER mode distinction.
     """
     pk = "SERIAL PRIMARY KEY" if IS_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
     
@@ -92,12 +92,13 @@ def init_db():
         )
     """, commit=True)
 
-    # 3. Spot Trades (Upgraded for remaining_qty and TP3)
+    # 3. Spot Trades (Upgraded for remaining_qty, TP3, and Paper/Live separation)
     execute_query(f"""
         CREATE TABLE IF NOT EXISTS spot_trades (
             id {pk},
             account_id TEXT NOT NULL,
             pair TEXT NOT NULL,
+            trade_mode TEXT DEFAULT 'PAPER', 
             status TEXT DEFAULT 'OPEN',
             entry_price REAL NOT NULL,
             exit_price REAL,
@@ -114,12 +115,13 @@ def init_db():
         )
     """, commit=True)
 
-    # 4. Futures Trades (Upgraded for Micro-Risk & Peak/Worst Tracking)
+    # 4. Futures Trades (Upgraded for Micro-Risk, Peak/Worst Tracking, and Paper/Live separation)
     execute_query(f"""
         CREATE TABLE IF NOT EXISTS futures_trades (
             id {pk},
             account_id TEXT NOT NULL,
             pair TEXT NOT NULL,
+            trade_mode TEXT DEFAULT 'PAPER',
             direction TEXT NOT NULL,
             status TEXT DEFAULT 'OPEN',
             entry_price REAL NOT NULL,
@@ -190,4 +192,4 @@ def add_log(level: str, source: str, message: str):
 
 if __name__ == "__main__":
     init_db()
-    print("ApexTick Database Initialized with Advanced Scalping Metrics.")
+    print("ApexTick Database Initialized with Advanced Scalping Metrics & Trade Modes.")

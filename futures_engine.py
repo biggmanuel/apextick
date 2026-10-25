@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 import pandas as pd
 import ccxt
 
-from config import FUTURES_CONFIG, MARKET_SCANNER_CONFIG
+# IMPORT THE MASTER TOGGLE (PAPER_TRADING) and real API keys
+from config import FUTURES_CONFIG, MARKET_SCANNER_CONFIG, PAPER_TRADING, BINANCE_API_KEY, BINANCE_SECRET_KEY, exchange as live_exchange
 from database import execute_query, add_log
 from btc_decline_signal import is_trading_allowed_by_btc_gate, MARKET_STATE
 
@@ -70,21 +71,22 @@ def calculate_futures_macro_trend() -> str:
     return "NEUTRAL"
 
 
-def is_account_on_futures_cooldown(account_id: str) -> tuple[bool, int]:
+def is_account_on_futures_cooldown(account_id: str, mode: str) -> tuple[bool, int]:
     """
     Prevents the engine from spam-opening trades by enforcing a strict
     time-based cooldown window after a trade is successfully opened.
+    Matches the specific trade mode (PAPER or LIVE).
     """
     last_trade = execute_query(
-        "SELECT opened_at FROM futures_trades WHERE account_id = ? AND status = 'OPEN' ORDER BY id DESC LIMIT 1",
-        (account_id,), 
+        "SELECT opened_at FROM futures_trades WHERE account_id = ? AND trade_mode = ? AND status = 'OPEN' ORDER BY id DESC LIMIT 1",
+        (account_id, mode), 
         fetch_one=True
     )
     
     if not last_trade or not last_trade.get("opened_at"):
         last_trade = execute_query(
-            "SELECT opened_at FROM futures_trades WHERE account_id = ? ORDER BY id DESC LIMIT 1",
-            (account_id,),
+            "SELECT opened_at FROM futures_trades WHERE account_id = ? AND trade_mode = ? ORDER BY id DESC LIMIT 1",
+            (account_id, mode),
             fetch_one=True
         )
 
@@ -168,9 +170,11 @@ def check_micro_structure(pair: str, current_price: float) -> tuple[bool, str]:
 
 def run_futures_engine_tick() -> str:
     """
-    Master loop for the Live Paper Trading Futures Engine.
+    Master loop for the Live Paper Trading & Real Execution Futures Engine.
     Executes a complete evaluation cycle across all active accounts and pairs.
     """
+    CURRENT_MODE = "PAPER" if PAPER_TRADING else "LIVE"
+
     # 1. Fetch the Dynamic Hot List (Top 50 Explosive Coins)
     pairs = execute_query(
         """
@@ -199,6 +203,8 @@ def run_futures_engine_tick() -> str:
     
     for acct in accounts:
         acct_id = acct["account_id"]
+        
+        # When live trading, we should ideally fetch real wallet balance, but for now we rely on the internal DB tracker
         balance = float(acct["futures_balance_usdt"] or 0.0)
 
         open_positions = execute_query(
@@ -207,9 +213,9 @@ def run_futures_engine_tick() -> str:
                    notional_usdt, leverage, pnl_usdt, pnl_pct, close_type, peak_roi_pct,
                    worst_roi_pct, tp1_hit, tp2_hit, tp3_hit, opened_at
             FROM futures_trades
-            WHERE account_id = ? AND status = 'OPEN'
+            WHERE account_id = ? AND status = 'OPEN' AND trade_mode = ?
             """,
-            (acct_id,),
+            (acct_id, CURRENT_MODE),
             fetch_all=True
         )
 
@@ -258,6 +264,24 @@ def run_futures_engine_tick() -> str:
                     margin_to_close = rem_margin
 
                 notional_closed = margin_to_close * leverage
+                
+                # --- LIVE MARKET EXECUTION BLOCK ---
+                if not PAPER_TRADING:
+                    try:
+                        symbol = pair.replace("/", "")
+                        side = "sell" if direction == "LONG" else "buy"
+                        # Fetch the exchange rules for minimum qty increments
+                        live_exchange.load_markets()
+                        market = live_exchange.market(symbol)
+                        base_qty = notional_closed / current_price
+                        qty = live_exchange.amount_to_precision(symbol, base_qty)
+                        
+                        live_exchange.create_order(symbol, "market", side, qty)
+                        add_log("INFO", "api_execution", f"LIVE {side.upper()} order sent for {qty} {symbol} at Market (TP1)")
+                    except Exception as e:
+                        add_log("ERROR", "api_execution", f"Failed to execute LIVE TP1 for {pair}: {e}")
+                        continue # Abort the internal DB close if the live order fails
+                
                 gross_pnl = margin_to_close * (roi_pct / 100.0)
                 fee_usdt = notional_closed * (FUTURES_CONFIG["fee_pct"] / 100.0)
                 net_partial_pnl = gross_pnl - fee_usdt
@@ -267,14 +291,14 @@ def run_futures_engine_tick() -> str:
                 execute_query(
                     """
                     INSERT INTO futures_trades (
-                        account_id, pair, direction, status, entry_price, exit_price,
+                        account_id, pair, trade_mode, direction, status, entry_price, exit_price,
                         margin_usdt, remaining_margin_usdt, notional_usdt, leverage,
                         pnl_usdt, pnl_pct, close_type, peak_roi_pct, worst_roi_pct,
                         tp1_hit, tp2_hit, tp3_hit, opened_at, closed_at
-                    ) VALUES (?, ?, ?, 'CLOSED', ?, ?, ?, 0.0, ?, ?, ?, ?, 'TP1 (+20% ROI)', ?, ?, 1, 0, 0, ?, ?)
+                    ) VALUES (?, ?, ?, ?, 'CLOSED', ?, ?, ?, 0.0, ?, ?, ?, ?, 'TP1 (+20% ROI)', ?, ?, 1, 0, 0, ?, ?)
                     """,
                     (
-                        acct_id, pair, direction, entry_price, current_price,
+                        acct_id, pair, CURRENT_MODE, direction, entry_price, current_price,
                         margin_to_close, notional_closed, leverage,
                         net_partial_pnl, roi_pct, peak_roi, worst_roi,
                         trade["opened_at"], now_str
@@ -296,7 +320,7 @@ def run_futures_engine_tick() -> str:
                     commit=True
                 )
 
-                msg = f"[{acct['display_name']}] FUTURES TP1 HIT 💰: Scaled out 30% on {pair} {direction} at ${current_price:,.4f} | Locked: +${net_partial_pnl:.2f}"
+                msg = f"[{acct['display_name']}] {CURRENT_MODE} FUTURES TP1 HIT 💰: Scaled out 30% on {pair} {direction} at ${current_price:,.4f} | Locked: +${net_partial_pnl:.2f}"
                 add_log("SUCCESS", "apextick_bot", msg)
                 activity_summary.append(msg)
                 continue
@@ -310,6 +334,23 @@ def run_futures_engine_tick() -> str:
                     margin_to_close = rem_margin
 
                 notional_closed = margin_to_close * leverage
+                
+                # --- LIVE MARKET EXECUTION BLOCK ---
+                if not PAPER_TRADING:
+                    try:
+                        symbol = pair.replace("/", "")
+                        side = "sell" if direction == "LONG" else "buy"
+                        live_exchange.load_markets()
+                        market = live_exchange.market(symbol)
+                        base_qty = notional_closed / current_price
+                        qty = live_exchange.amount_to_precision(symbol, base_qty)
+                        
+                        live_exchange.create_order(symbol, "market", side, qty)
+                        add_log("INFO", "api_execution", f"LIVE {side.upper()} order sent for {qty} {symbol} at Market (TP2)")
+                    except Exception as e:
+                        add_log("ERROR", "api_execution", f"Failed to execute LIVE TP2 for {pair}: {e}")
+                        continue
+                
                 gross_pnl = margin_to_close * (roi_pct / 100.0)
                 fee_usdt = notional_closed * (FUTURES_CONFIG["fee_pct"] / 100.0)
                 net_partial_pnl = gross_pnl - fee_usdt
@@ -319,14 +360,14 @@ def run_futures_engine_tick() -> str:
                 execute_query(
                     """
                     INSERT INTO futures_trades (
-                        account_id, pair, direction, status, entry_price, exit_price,
+                        account_id, pair, trade_mode, direction, status, entry_price, exit_price,
                         margin_usdt, remaining_margin_usdt, notional_usdt, leverage,
                         pnl_usdt, pnl_pct, close_type, peak_roi_pct, worst_roi_pct,
                         tp1_hit, tp2_hit, tp3_hit, opened_at, closed_at
-                    ) VALUES (?, ?, ?, 'CLOSED', ?, ?, ?, 0.0, ?, ?, ?, ?, 'TP2 (+50% ROI)', ?, ?, tp1_hit, 1, 0, ?, ?)
+                    ) VALUES (?, ?, ?, ?, 'CLOSED', ?, ?, ?, 0.0, ?, ?, ?, ?, 'TP2 (+50% ROI)', ?, ?, tp1_hit, 1, 0, ?, ?)
                     """,
                     (
-                        acct_id, pair, direction, entry_price, current_price,
+                        acct_id, pair, CURRENT_MODE, direction, entry_price, current_price,
                         margin_to_close, notional_closed, leverage,
                         net_partial_pnl, roi_pct, peak_roi, worst_roi,
                         trade["opened_at"], now_str
@@ -348,7 +389,7 @@ def run_futures_engine_tick() -> str:
                     commit=True
                 )
 
-                msg = f"[{acct['display_name']}] FUTURES TP2 HIT 🚀: Scaled out 40% on {pair} {direction} at ${current_price:,.4f} | Locked: +${net_partial_pnl:.2f}"
+                msg = f"[{acct['display_name']}] {CURRENT_MODE} FUTURES TP2 HIT 🚀: Scaled out 40% on {pair} {direction} at ${current_price:,.4f} | Locked: +${net_partial_pnl:.2f}"
                 add_log("SUCCESS", "apextick_bot", msg)
                 activity_summary.append(msg)
                 continue
@@ -373,6 +414,23 @@ def run_futures_engine_tick() -> str:
 
             if outlier_triggered:
                 notional_closed = rem_margin * leverage
+                
+                # --- LIVE MARKET EXECUTION BLOCK ---
+                if not PAPER_TRADING:
+                    try:
+                        symbol = pair.replace("/", "")
+                        side = "sell" if direction == "LONG" else "buy"
+                        live_exchange.load_markets()
+                        market = live_exchange.market(symbol)
+                        base_qty = notional_closed / current_price
+                        qty = live_exchange.amount_to_precision(symbol, base_qty)
+                        
+                        live_exchange.create_order(symbol, "market", side, qty)
+                        add_log("INFO", "api_execution", f"LIVE {side.upper()} order sent for {qty} {symbol} at Market (TP3 Runner)")
+                    except Exception as e:
+                        add_log("ERROR", "api_execution", f"Failed to execute LIVE TP3 for {pair}: {e}")
+                        continue
+                
                 gross_pnl = rem_margin * (roi_pct / 100.0)
                 fee_usdt = notional_closed * (FUTURES_CONFIG["fee_pct"] / 100.0)
                 net_final_pnl = gross_pnl - fee_usdt
@@ -397,7 +455,7 @@ def run_futures_engine_tick() -> str:
                     commit=True
                 )
 
-                msg = f"[{acct['display_name']}] 🔥 {close_label}: Final bag closed on {pair} {direction} at ${current_price:,.4f} | Profit: +${net_final_pnl:.2f}"
+                msg = f"[{acct['display_name']}] 🔥 {CURRENT_MODE} {close_label}: Final bag closed on {pair} {direction} at ${current_price:,.4f} | Profit: +${net_final_pnl:.2f}"
                 add_log("SUCCESS", "apextick_bot", msg)
                 activity_summary.append(msg)
                 continue
@@ -429,6 +487,23 @@ def run_futures_engine_tick() -> str:
 
             if risk_exit_type:
                 notional_closed = rem_margin * leverage
+                
+                # --- LIVE MARKET EXECUTION BLOCK ---
+                if not PAPER_TRADING:
+                    try:
+                        symbol = pair.replace("/", "")
+                        side = "sell" if direction == "LONG" else "buy"
+                        live_exchange.load_markets()
+                        market = live_exchange.market(symbol)
+                        base_qty = notional_closed / current_price
+                        qty = live_exchange.amount_to_precision(symbol, base_qty)
+                        
+                        live_exchange.create_order(symbol, "market", side, qty)
+                        add_log("INFO", "api_execution", f"LIVE {side.upper()} order sent for {qty} {symbol} at Market (Risk Exit)")
+                    except Exception as e:
+                        add_log("ERROR", "api_execution", f"Failed to execute LIVE Risk Exit for {pair}: {e}")
+                        continue
+                
                 gross_loss = rem_margin * (roi_pct / 100.0)
                 fee_usdt = notional_closed * (FUTURES_CONFIG["fee_pct"] / 100.0)
                 net_loss = gross_loss - fee_usdt
@@ -453,7 +528,7 @@ def run_futures_engine_tick() -> str:
                 )
 
                 log_level = "WARNING" if net_loss < 0 else "SUCCESS"
-                msg = f"[{acct['display_name']}] FUTURES {risk_exit_type}: {pair} {direction} closed at ${current_price:,.4f} | PnL: ${net_loss:+.2f}"
+                msg = f"[{acct['display_name']}] {CURRENT_MODE} FUTURES {risk_exit_type}: {pair} {direction} closed at ${current_price:,.4f} | PnL: ${net_loss:+.2f}"
                 add_log(log_level, "apextick_bot", msg)
                 activity_summary.append(msg)
 
@@ -504,13 +579,13 @@ def run_futures_engine_tick() -> str:
         if available_margin < FUTURES_CONFIG["min_margin_usdt"]:
             continue
             
-        on_cooldown, rem_sec = is_account_on_futures_cooldown(acct_id)
+        on_cooldown, rem_sec = is_account_on_futures_cooldown(acct_id, CURRENT_MODE)
         if on_cooldown:
             continue
 
         open_positions = execute_query(
-            "SELECT pair FROM futures_trades WHERE account_id = ? AND status = 'OPEN'",
-            (acct_id,), fetch_all=True
+            "SELECT pair FROM futures_trades WHERE account_id = ? AND status = 'OPEN' AND trade_mode = ?",
+            (acct_id, CURRENT_MODE), fetch_all=True
         )
         if len(open_positions) >= FUTURES_CONFIG["max_open_positions"]:
             continue
@@ -555,15 +630,43 @@ def run_futures_engine_tick() -> str:
             notional_value = margin_usdt * FUTURES_CONFIG["leverage"]
             open_time = datetime.now(timezone.utc).isoformat()
             
+            # --- LIVE MARKET EXECUTION BLOCK ---
+            if not PAPER_TRADING:
+                try:
+                    # Binance uses raw symbols (e.g. SOLUSDT)
+                    symbol = pair.replace("/", "")
+                    side = "buy" if target_direction == "LONG" else "sell"
+                    
+                    # Convert our target USD leverage into exchange leverage
+                    live_exchange.set_leverage(FUTURES_CONFIG["leverage"], symbol)
+                    
+                    # Calculate exact quantity to buy based on notional value
+                    live_exchange.load_markets()
+                    market = live_exchange.market(symbol)
+                    base_qty = notional_value / entry_price
+                    qty = live_exchange.amount_to_precision(symbol, base_qty)
+                    
+                    # Execute Market Order
+                    order = live_exchange.create_order(symbol, "market", side, qty)
+                    add_log("INFO", "api_execution", f"LIVE {side.upper()} order filled for {qty} {symbol} at Market")
+                    
+                    # Use the real exchange fill price instead of the websocket stream price
+                    entry_price = float(order.get("average", entry_price))
+                    
+                except Exception as e:
+                    add_log("ERROR", "api_execution", f"Failed to execute LIVE ENTRY for {pair}: {e}")
+                    continue # Do not save to DB if live execution fails
+            
+            # Save the successful trade (Paper or Live) to the ledger
             execute_query(
                 """
                 INSERT INTO futures_trades (
-                    account_id, pair, direction, status, entry_price, 
+                    account_id, pair, trade_mode, direction, status, entry_price, 
                     margin_usdt, remaining_margin_usdt, notional_usdt, leverage, opened_at
-                ) VALUES (?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    acct_id, pair, target_direction, entry_price, 
+                    acct_id, pair, CURRENT_MODE, target_direction, entry_price, 
                     margin_usdt, margin_usdt, notional_value, 
                     FUTURES_CONFIG["leverage"], open_time
                 ), 
@@ -578,7 +681,7 @@ def run_futures_engine_tick() -> str:
             )
             
             msg = (
-                f"[{fresh_acct['display_name']}] FUTURES PAPER ENTRY: Opened {target_direction} "
+                f"[{fresh_acct['display_name']}] {CURRENT_MODE} FUTURES ENTRY: Opened {target_direction} "
                 f"on {pair} at ${entry_price:,.4f} (Margin: ${margin_usdt:.2f} @ {FUTURES_CONFIG['leverage']}x)\n"
                 f"🧠 Sniper Logic: {micro_reason} | Macro Trend: {btc_trend}"
             )

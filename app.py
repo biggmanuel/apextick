@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from flask import Flask, render_template, request, jsonify
 
 # --- APEXTICK CORE IMPORTS ---
-from config import BOT_NAME, ADMIN_KEY, MARKET_SCANNER_CONFIG
+from config import BOT_NAME, ADMIN_KEY, MARKET_SCANNER_CONFIG, PAPER_TRADING
 from database import init_db, execute_query, add_log
 from btc_decline_signal import (
     start_btc_stream_background, backfill_btc_history,
@@ -48,8 +48,8 @@ def futures_engine_loop():
         time.sleep(3)
 
 def dynamic_scanner_loop():
-    """Continuously rebuilds the top 50 volatile asset Hot List."""
-    interval = MARKET_SCANNER_CONFIG.get("refresh_interval_minutes", 5) * 60
+    """Continuously rebuilds the top N volatile asset Hot List."""
+    interval = MARKET_SCANNER_CONFIG.get("refresh_interval_minutes", 0.5) * 60
     add_log("INFO", "system", f"Dynamic Scanner Thread Started (Tick: {interval}s).")
     while True:
         try:
@@ -74,7 +74,8 @@ def start_background_services():
 
 @app.route("/")
 def index():
-    return render_template("dashboard.html", bot_name=BOT_NAME)
+    # Pass the PAPER_TRADING flag to the frontend template so the UI knows the mode
+    return render_template("dashboard.html", bot_name=BOT_NAME, paper_trading=PAPER_TRADING)
 
 @app.route("/api/status", methods=["GET"])
 def api_status():
@@ -84,7 +85,8 @@ def api_status():
         "api_ok": True,
         "btc_gate_allowed": allowed,
         "btc_gate_reason": reason,
-        "ws_connected": MARKET_STATE.get("ws_connected", False)
+        "ws_connected": MARKET_STATE.get("ws_connected", False),
+        "execution_mode": "PAPER TRADING" if PAPER_TRADING else "LIVE TRADING"
     })
 
 @app.route("/api/btc-sentiment", methods=["GET"])
@@ -101,13 +103,13 @@ def api_btc_sentiment():
 
 @app.route("/api/statistics", methods=["GET"])
 def api_statistics():
-    """Spot Engine Statistics (Cleaned up thanks to DB auto-logging)"""
-    spot_trades = execute_query("SELECT * FROM spot_trades", fetch_all=True) or []
+    """Spot Engine Statistics (Filters by current execution mode)"""
+    current_mode = "PAPER" if PAPER_TRADING else "LIVE"
+    spot_trades = execute_query("SELECT * FROM spot_trades WHERE trade_mode = ?", (current_mode,), fetch_all=True) or []
     
     closed_trades = [t for t in spot_trades if t["status"] == "CLOSED"]
     open_trades = [t for t in spot_trades if t["status"] == "OPEN"]
     
-    # Realized profit now simply sums the PnL of closed trades AND the locked partials on open trades
     realized_spot_profit = sum(float(t["profit_usdt"] or 0) for t in spot_trades)
     total_volume = sum(float(t["notional_usdt"] or 0) for t in spot_trades)
     
@@ -128,8 +130,9 @@ def api_statistics():
 
 @app.route("/api/futures/statistics", methods=["GET"])
 def api_futures_statistics():
-    """Futures Engine Statistics (Institutional metrics included)"""
-    fut_trades = execute_query("SELECT * FROM futures_trades", fetch_all=True) or []
+    """Futures Engine Statistics (Filters by current execution mode)"""
+    current_mode = "PAPER" if PAPER_TRADING else "LIVE"
+    fut_trades = execute_query("SELECT * FROM futures_trades WHERE trade_mode = ?", (current_mode,), fetch_all=True) or []
     
     closed = [t for t in fut_trades if t["status"] == "CLOSED"]
     open_pos = [t for t in fut_trades if t["status"] == "OPEN"]
@@ -140,7 +143,6 @@ def api_futures_statistics():
     tp_profit = sum(float(t["pnl_usdt"] or 0) for t in tp_closes if float(t.get("pnl_usdt", 0) or 0) > 0)
     sl_loss = sum(float(t["pnl_usdt"] or 0) for t in sl_closes if float(t.get("pnl_usdt", 0) or 0) < 0)
     
-    # Net PnL calculation is seamless now
     net_pnl = sum(float(t["pnl_usdt"] or 0) for t in fut_trades)
     total_vol = sum(float(t["notional_usdt"] or 0) for t in fut_trades)
     
@@ -164,18 +166,19 @@ def api_futures_statistics():
         "live_withdraw": round(live_withdraw, 2),
     })
 
-
 @app.route("/api/positions", methods=["GET"])
 def api_positions():
     """Feeds Live Positions to the UI, highlighting Peak/Worst ROI and Tiers."""
+    current_mode = "PAPER" if PAPER_TRADING else "LIVE"
+    
     spot_open = execute_query(
-        "SELECT id, account_id, pair, entry_price, remaining_qty as qty, tp1_hit, tp2_hit, tp3_hit, opened_at FROM spot_trades WHERE status = 'OPEN'",
-        fetch_all=True
+        "SELECT id, account_id, pair, entry_price, remaining_qty as qty, tp1_hit, tp2_hit, tp3_hit, opened_at FROM spot_trades WHERE status = 'OPEN' AND trade_mode = ?",
+        (current_mode,), fetch_all=True
     ) or []
     
     fut_open = execute_query(
-        "SELECT id, account_id, pair, direction, entry_price, remaining_margin_usdt as margin, leverage, peak_roi_pct, worst_roi_pct, tp1_hit, tp2_hit, tp3_hit, opened_at FROM futures_trades WHERE status = 'OPEN'",
-        fetch_all=True
+        "SELECT id, account_id, pair, direction, entry_price, remaining_margin_usdt as margin, leverage, peak_roi_pct, worst_roi_pct, tp1_hit, tp2_hit, tp3_hit, opened_at FROM futures_trades WHERE status = 'OPEN' AND trade_mode = ?",
+        (current_mode,), fetch_all=True
     ) or []
 
     positions = []
@@ -282,10 +285,11 @@ def force_close_trade(trade_type, trade_id):
 
 @app.route("/api/trades", methods=["GET"])
 def api_trades():
+    current_mode = "PAPER" if PAPER_TRADING else "LIVE"
     limit = int(request.args.get("limit", 500))
     trades = execute_query(
-        "SELECT pair, entry_price, exit_price, profit_usdt, profit_pct, opened_at FROM spot_trades WHERE status = 'CLOSED' ORDER BY id DESC LIMIT ?",
-        (limit,), fetch_all=True
+        "SELECT pair, entry_price, exit_price, profit_usdt, profit_pct, opened_at FROM spot_trades WHERE status = 'CLOSED' AND trade_mode = ? ORDER BY id DESC LIMIT ?",
+        (current_mode, limit,), fetch_all=True
     ) or []
     
     formatted = [{
@@ -299,16 +303,17 @@ def api_trades():
 
 @app.route("/api/futures/trades", methods=["GET"])
 def api_futures_trades():
+    current_mode = "PAPER" if PAPER_TRADING else "LIVE"
     limit = int(request.args.get("limit", 500))
     trades = execute_query(
         """
         SELECT ft.*, a.display_name 
         FROM futures_trades ft
         LEFT JOIN accounts a ON ft.account_id = a.account_id
-        WHERE ft.status = 'CLOSED' 
+        WHERE ft.status = 'CLOSED' AND ft.trade_mode = ?
         ORDER BY ft.id DESC LIMIT ?
         """,
-        (limit,), fetch_all=True
+        (current_mode, limit,), fetch_all=True
     ) or []
     
     formatted = [{
@@ -330,7 +335,8 @@ def api_logs():
 
 @app.route("/api/wallet", methods=["GET"])
 def api_wallet():
-    return jsonify({"wallet": "ApexTick Institutional Engine"})
+    # Shows active mode dynamically
+    return jsonify({"wallet": f"ApexTick Institutional Engine ({'PAPER' if PAPER_TRADING else 'LIVE'})"})
 
 @app.route("/api/bot/btc-config", methods=["GET"])
 def api_get_btc_config():

@@ -64,7 +64,7 @@ def sync_binance_pairs():
     now_str = datetime.now(timezone.utc).isoformat()
     
     # Load parameters from the new Dynamic Scanner Config
-    min_vol_usd = MARKET_SCANNER_CONFIG.get("min_24h_volume_usdt", 10_000_000)
+    min_vol_usd = MARKET_SCANNER_CONFIG.get("min_24h_volume_usdt", 3_000_000)
     max_pairs = MARKET_SCANNER_CONFIG.get("top_n_coins", 50)
     
     candidates = {}
@@ -237,6 +237,14 @@ def is_trading_allowed_by_btc_gate() -> tuple[bool, str]:
     
     if not decline_enabled:
         return True, f"Decline signal OFF (Computed: {'ALLOW' if not ev['block'] else 'BLOCK'})"
+    
+    # We must also enforce the buy/sell pressure limits set in config.py
+    if MARKET_STATE["buy_pressure_pct"] < BTC_GATE_CONFIG["min_buy_pressure_pct"]:
+        return False, f"Buy pressure ({MARKET_STATE['buy_pressure_pct']}%) below minimum ({BTC_GATE_CONFIG['min_buy_pressure_pct']}%)"
+        
+    if MARKET_STATE["sell_pressure_pct"] > BTC_GATE_CONFIG["max_sell_pressure_pct"]:
+         return False, f"Sell pressure ({MARKET_STATE['sell_pressure_pct']}%) exceeds maximum ({BTC_GATE_CONFIG['max_sell_pressure_pct']}%)"
+         
     return not ev["block"], ev["reason"]
 
 def start_btc_stream_background():
@@ -357,7 +365,7 @@ def start_btc_stream_background():
 
     # --- THE DYNAMIC SCANNER LOOP ---
     def dynamic_scanner_loop():
-        interval = MARKET_SCANNER_CONFIG.get("refresh_interval_minutes", 5) * 60
+        interval = MARKET_SCANNER_CONFIG.get("refresh_interval_minutes", 0.5) * 60
         while True:
             try:
                 sync_binance_pairs()

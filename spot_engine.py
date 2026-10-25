@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 import pandas as pd
 import ccxt
 
-from config import SPOT_CONFIG, MARKET_SCANNER_CONFIG
+# IMPORT THE MASTER TOGGLE (PAPER_TRADING) and real API keys
+from config import SPOT_CONFIG, MARKET_SCANNER_CONFIG, PAPER_TRADING, exchange as live_exchange
 from database import execute_query, add_log
 from btc_decline_signal import is_trading_allowed_by_btc_gate, MARKET_STATE
 
@@ -62,14 +63,15 @@ def calculate_btc_macro_regime() -> str:
     return "NEUTRAL"
 
 
-def is_account_on_spot_cooldown(account_id: str) -> tuple[bool, int]:
+def is_account_on_spot_cooldown(account_id: str, mode: str) -> tuple[bool, int]:
     """
     Prevents the Spot engine from deploying all capital into the same 
     millisecond dip by enforcing a time-based cooldown.
+    Matches the specific trade mode (PAPER or LIVE).
     """
     last_trade = execute_query(
-        "SELECT opened_at FROM spot_trades WHERE account_id = ? ORDER BY id DESC LIMIT 1",
-        (account_id,),
+        "SELECT opened_at FROM spot_trades WHERE account_id = ? AND trade_mode = ? ORDER BY id DESC LIMIT 1",
+        (account_id, mode),
         fetch_one=True
     )
     if not last_trade or not last_trade.get("opened_at"):
@@ -151,9 +153,11 @@ def check_spot_accumulation_zone(pair: str, current_price: float) -> tuple[bool,
 
 def run_spot_scalper_tick() -> str:
     """
-    Master loop for the Live Paper Trading Spot Engine.
+    Master loop for the Live Paper Trading & Real Execution Spot Engine.
     Executes tiered scale-outs and high-probability accumulation.
     """
+    CURRENT_MODE = "PAPER" if PAPER_TRADING else "LIVE"
+
     pairs = execute_query(
         """
         SELECT pair, last_price, change_24h_pct, volume_24h_usd
@@ -184,9 +188,9 @@ def run_spot_scalper_tick() -> str:
             SELECT id, pair, entry_price, qty, remaining_qty, notional_usdt, profit_usdt, 
                    tp1_hit, tp2_hit, opened_at 
             FROM spot_trades 
-            WHERE account_id = ? AND status = 'OPEN'
+            WHERE account_id = ? AND status = 'OPEN' AND trade_mode = ?
             """,
-            (acct_id,),
+            (acct_id, CURRENT_MODE),
             fetch_all=True
         )
 
@@ -214,6 +218,19 @@ def run_spot_scalper_tick() -> str:
             # Check Tiers in descending order to catch massive flash pumps
             if profit_pct >= SPOT_CONFIG["tp3_pct"]:
                 # TP3 (+6%): Close remaining bag completely
+                
+                # --- LIVE MARKET EXECUTION BLOCK ---
+                if not PAPER_TRADING:
+                    try:
+                        symbol = pair.replace("/", "")
+                        live_exchange.load_markets()
+                        qty_to_sell = float(live_exchange.amount_to_precision(symbol, rem_qty))
+                        live_exchange.create_order(symbol, "market", "sell", qty_to_sell)
+                        add_log("INFO", "api_execution", f"LIVE SELL order sent for {qty_to_sell} {symbol} at Market (TP3)")
+                    except Exception as e:
+                        add_log("ERROR", "api_execution", f"Failed to execute LIVE TP3 for {pair}: {e}")
+                        continue
+                        
                 sell_notional = rem_qty * current_price
                 gross_profit = sell_notional - (rem_qty * entry_price)
                 fee_usdt = sell_notional * (SPOT_CONFIG["fee_pct"] / 100.0)
@@ -233,7 +250,7 @@ def run_spot_scalper_tick() -> str:
                 balance += (sell_notional - fee_usdt)
                 execute_query("UPDATE accounts SET spot_balance_usdt = ? WHERE account_id = ?", (balance, acct_id), commit=True)
 
-                msg = f"[{acct['display_name']}] SPOT TP3 HIT 🎯: Fully closed {pair} at ${current_price:,.4f} | Final Profit: +${total_profit:.2f}"
+                msg = f"[{acct['display_name']}] {CURRENT_MODE} SPOT TP3 HIT 🎯: Fully closed {pair} at ${current_price:,.4f} | Final Profit: +${total_profit:.2f}"
                 add_log("SUCCESS", "apextick_bot", msg)
                 activity_summary.append(msg)
                 continue
@@ -244,6 +261,18 @@ def run_spot_scalper_tick() -> str:
                 if sell_qty > rem_qty: 
                     sell_qty = rem_qty
                 
+                # --- LIVE MARKET EXECUTION BLOCK ---
+                if not PAPER_TRADING:
+                    try:
+                        symbol = pair.replace("/", "")
+                        live_exchange.load_markets()
+                        qty_to_sell = float(live_exchange.amount_to_precision(symbol, sell_qty))
+                        live_exchange.create_order(symbol, "market", "sell", qty_to_sell)
+                        add_log("INFO", "api_execution", f"LIVE SELL order sent for {qty_to_sell} {symbol} at Market (TP2)")
+                    except Exception as e:
+                        add_log("ERROR", "api_execution", f"Failed to execute LIVE TP2 for {pair}: {e}")
+                        continue
+                        
                 sell_notional = sell_qty * current_price
                 gross_profit = sell_notional - (sell_qty * entry_price)
                 fee_usdt = sell_notional * (SPOT_CONFIG["fee_pct"] / 100.0)
@@ -261,7 +290,7 @@ def run_spot_scalper_tick() -> str:
                 balance += (sell_notional - fee_usdt)
                 execute_query("UPDATE accounts SET spot_balance_usdt = ? WHERE account_id = ?", (balance, acct_id), commit=True)
                 
-                msg = f"[{acct['display_name']}] SPOT TP2 HIT 🚀: Scaled out of {pair} at ${current_price:,.4f} | Locked: +${net_profit_usdt:.2f}"
+                msg = f"[{acct['display_name']}] {CURRENT_MODE} SPOT TP2 HIT 🚀: Scaled out of {pair} at ${current_price:,.4f} | Locked: +${net_profit_usdt:.2f}"
                 add_log("SUCCESS", "apextick_bot", msg)
                 activity_summary.append(msg)
 
@@ -271,6 +300,18 @@ def run_spot_scalper_tick() -> str:
                 if sell_qty > rem_qty: 
                     sell_qty = rem_qty
                 
+                # --- LIVE MARKET EXECUTION BLOCK ---
+                if not PAPER_TRADING:
+                    try:
+                        symbol = pair.replace("/", "")
+                        live_exchange.load_markets()
+                        qty_to_sell = float(live_exchange.amount_to_precision(symbol, sell_qty))
+                        live_exchange.create_order(symbol, "market", "sell", qty_to_sell)
+                        add_log("INFO", "api_execution", f"LIVE SELL order sent for {qty_to_sell} {symbol} at Market (TP1)")
+                    except Exception as e:
+                        add_log("ERROR", "api_execution", f"Failed to execute LIVE TP1 for {pair}: {e}")
+                        continue
+                        
                 sell_notional = sell_qty * current_price
                 gross_profit = sell_notional - (sell_qty * entry_price)
                 fee_usdt = sell_notional * (SPOT_CONFIG["fee_pct"] / 100.0)
@@ -288,7 +329,7 @@ def run_spot_scalper_tick() -> str:
                 balance += (sell_notional - fee_usdt)
                 execute_query("UPDATE accounts SET spot_balance_usdt = ? WHERE account_id = ?", (balance, acct_id), commit=True)
                 
-                msg = f"[{acct['display_name']}] SPOT TP1 HIT 💰: Scaled out of {pair} at ${current_price:,.4f} | Locked: +${net_profit_usdt:.2f}"
+                msg = f"[{acct['display_name']}] {CURRENT_MODE} SPOT TP1 HIT 💰: Scaled out of {pair} at ${current_price:,.4f} | Locked: +${net_profit_usdt:.2f}"
                 add_log("SUCCESS", "apextick_bot", msg)
                 activity_summary.append(msg)
 
@@ -324,13 +365,13 @@ def run_spot_scalper_tick() -> str:
         cap = float(fresh_acct.get("spot_capital_cap") or 999999.0)
         available_usdt = min(balance, cap)
 
-        on_cooldown, rem_sec = is_account_on_spot_cooldown(acct_id)
+        on_cooldown, rem_sec = is_account_on_spot_cooldown(acct_id, CURRENT_MODE)
         if on_cooldown:
             continue
 
         open_positions = execute_query(
-            "SELECT pair FROM spot_trades WHERE account_id = ? AND status = 'OPEN'",
-            (acct_id,),
+            "SELECT pair FROM spot_trades WHERE account_id = ? AND status = 'OPEN' AND trade_mode = ?",
+            (acct_id, CURRENT_MODE),
             fetch_all=True
         )
         held_pairs = {p["pair"] for p in open_positions}
@@ -375,15 +416,28 @@ def run_spot_scalper_tick() -> str:
 
             qty = trade_usdt / current_price
             now_str = datetime.now(timezone.utc).isoformat()
+            
+            # --- LIVE MARKET EXECUTION BLOCK ---
+            if not PAPER_TRADING:
+                try:
+                    symbol = pair.replace("/", "")
+                    live_exchange.load_markets()
+                    qty = float(live_exchange.amount_to_precision(symbol, qty))
+                    order = live_exchange.create_order(symbol, "market", "buy", qty)
+                    add_log("INFO", "api_execution", f"LIVE BUY order filled for {qty} {symbol} at Market")
+                    current_price = float(order.get("average", current_price))
+                except Exception as e:
+                    add_log("ERROR", "api_execution", f"Failed to execute LIVE ENTRY for {pair}: {e}")
+                    continue
 
-            # Execute Paper Trade
+            # Execute Paper/Live Trade in DB
             execute_query(
                 """
                 INSERT INTO spot_trades (
-                    account_id, pair, status, entry_price, qty, remaining_qty, notional_usdt, opened_at
-                ) VALUES (?, ?, 'OPEN', ?, ?, ?, ?, ?)
+                    account_id, pair, trade_mode, status, entry_price, qty, remaining_qty, notional_usdt, opened_at
+                ) VALUES (?, ?, ?, 'OPEN', ?, ?, ?, ?, ?)
                 """,
-                (acct_id, pair, current_price, qty, qty, trade_usdt, now_str),
+                (acct_id, pair, CURRENT_MODE, current_price, qty, qty, trade_usdt, now_str),
                 commit=True
             )
 
@@ -395,7 +449,7 @@ def run_spot_scalper_tick() -> str:
             )
 
             msg = (
-                f"[{fresh_acct['display_name']}] SPOT PAPER ENTRY: Bought {pair} at ${current_price:,.4f} (${trade_usdt:.2f})\n"
+                f"[{fresh_acct['display_name']}] {CURRENT_MODE} SPOT ENTRY: Bought {pair} at ${current_price:,.4f} (${trade_usdt:.2f})\n"
                 f"🎯 Sniper Logic: {micro_reason} | 24h: +{chg_24h:.2f}%"
             )
             add_log("INFO", "apextick_bot", msg)
