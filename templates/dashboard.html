@@ -36,9 +36,9 @@
             padding: 20px;
         }
 
-        .container { max-width: 1400px; margin: 0 auto; }
+        .container { max-width: 1500px; margin: 0 auto; }
 
-        /* --- HEADER --- */
+        /* --- HEADER & GOD MODE CONTROLS --- */
         .header {
             background: var(--bg-card);
             border: 1px solid var(--border-subtle);
@@ -58,7 +58,7 @@
             -webkit-text-fill-color: transparent;
             letter-spacing: 0.05em;
         }
-        .status-badges { display: flex; gap: 10px; }
+        .status-badges { display: flex; gap: 10px; align-items: center; }
         .badge {
             padding: 6px 12px;
             border-radius: 20px;
@@ -69,6 +69,51 @@
         }
         .badge.online { background: rgba(0, 255, 136, 0.1); color: var(--profit); border: 1px solid var(--profit); box-shadow: 0 0 10px rgba(0,255,136,0.2); }
         .badge.offline { background: rgba(255, 71, 87, 0.1); color: var(--loss); border: 1px solid var(--loss); }
+
+        .god-mode-controls {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            background: rgba(0,0,0,0.4);
+            padding: 10px 20px;
+            border-radius: 12px;
+            border: 1px solid var(--border-subtle);
+        }
+        .god-mode-controls label {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.8rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+        }
+        .text-warning { color: #fbbf24; }
+
+        /* Switches */
+        .switch { position: relative; display: inline-block; width: 44px; height: 22px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #334155; transition: .4s; border-radius: 24px; }
+        .slider:before { position: absolute; content: ""; height: 14px; width: 14px; left: 4px; bottom: 4px; background-color: white; transition: .4s; border-radius: 50%; }
+        input:checked + .slider { background-color: var(--profit); box-shadow: 0 0 10px var(--profit); }
+        input.danger:checked + .slider { background-color: var(--loss); box-shadow: 0 0 10px var(--loss); }
+        input:checked + .slider:before { transform: translateX(22px); }
+
+        .btn-panic {
+            background: rgba(255, 71, 87, 0.15);
+            color: var(--loss);
+            border: 1px solid var(--loss);
+            padding: 8px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            font-weight: 800;
+            text-transform: uppercase;
+            transition: 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .btn-panic:hover { background: var(--loss); color: #fff; box-shadow: 0 0 15px var(--loss); }
 
         /* --- KPI GRID --- */
         .kpi-grid {
@@ -82,12 +127,11 @@
             border: 1px solid var(--border-subtle);
             border-radius: 12px;
             padding: 20px;
+            position: relative;
+            overflow: hidden;
             transition: border-color 0.2s, transform 0.2s;
         }
-        .kpi-card:hover {
-            border-color: var(--border-glow);
-            transform: translateY(-2px);
-        }
+        .kpi-card:hover { border-color: var(--border-glow); transform: translateY(-2px); }
         .kpi-title { font-size: 0.75rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 8px; }
         .kpi-value { font-size: 1.75rem; font-weight: 700; }
         .kpi-sub { font-size: 0.8rem; color: var(--text-muted); margin-top: 4px; }
@@ -96,10 +140,10 @@
         .text-loss { color: var(--loss); }
         .text-cyan { color: var(--accent-cyan); }
 
-        /* --- MACRO & SCANNER WIDGETS --- */
+        /* --- WIDGET ROW --- */
         .widget-row {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
             gap: 16px;
             margin-bottom: 24px;
         }
@@ -108,11 +152,18 @@
             border: 1px solid var(--border-subtle);
             border-radius: 12px;
             padding: 20px;
+            display: flex;
+            flex-direction: column;
         }
-        .widget-header { font-size: 1rem; color: var(--accent-cyan); font-weight: 700; margin-bottom: 16px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px; }
+        .widget-header { font-size: 1rem; color: var(--accent-cyan); font-weight: 700; margin-bottom: 16px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px; text-transform: uppercase; }
+        
         .macro-stats { display: flex; justify-content: space-between; margin-bottom: 12px; font-size: 0.9rem;}
         .pressure-bar { height: 8px; border-radius: 4px; background: rgba(255,71,87,0.2); display: flex; overflow: hidden; margin-top: 8px; }
         .pressure-buy { height: 100%; background: var(--profit); transition: width 0.5s; }
+
+        .mini-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+        .mini-table th { color: var(--text-secondary); text-align: left; padding: 6px 0; border-bottom: 1px solid var(--border-subtle); }
+        .mini-table td { padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
 
         /* --- DATA TABLES --- */
         .table-container {
@@ -140,34 +191,41 @@
         .btn-close:hover { background: var(--loss); color: #fff; box-shadow: 0 0 12px var(--loss); }
 
         /* --- LOGS --- */
-        .logs-box {
-            background: #000;
-            border: 1px solid var(--border-subtle);
-            border-radius: 12px;
-            padding: 16px;
-            height: 300px;
-            overflow-y: auto;
-            font-family: var(--font-mono);
-            font-size: 0.8rem;
-            line-height: 1.5;
-        }
+        .logs-box { background: #000; border: 1px solid var(--border-subtle); border-radius: 12px; padding: 16px; height: 300px; overflow-y: auto; font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.5; }
         .log-entry { border-bottom: 1px solid rgba(255,255,255,0.05); padding: 4px 0; }
         .log-time { color: var(--text-muted); margin-right: 10px; }
         .log-INFO { color: var(--accent-cyan); }
         .log-SUCCESS { color: var(--profit); }
         .log-WARNING { color: #fbbf24; }
         .log-ERROR { color: var(--loss); }
-
-        /* Utilities */
         .font-mono { font-family: var(--font-mono); }
     </style>
 </head>
 <body>
 
 <div class="container">
-    <!-- Header -->
+    <!-- Header & God Mode Controls -->
     <div class="header">
         <div class="header-title">⚡ {{ bot_name }}</div>
+        
+        <div class="god-mode-controls">
+            <label class="text-warning">
+                LIVE FUNDS
+                <div class="switch">
+                    <input type="checkbox" id="live-toggle" onchange="toggleMode()">
+                    <span class="slider"></span>
+                </div>
+            </label>
+            <label class="text-loss">
+                BTC OVERRIDE
+                <div class="switch">
+                    <input type="checkbox" id="btc-override-toggle" class="danger" onchange="toggleBTCGate()">
+                    <span class="slider"></span>
+                </div>
+            </label>
+            <button class="btn-panic" onclick="panicSellAll()">🛑 LIQUIDATE ALL</button>
+        </div>
+
         <div class="status-badges">
             <span class="badge online" id="sys-status">SYSTEM ONLINE</span>
             <span class="badge online" id="ws-status">WS CONNECTED</span>
@@ -189,53 +247,76 @@
         <div class="kpi-card">
             <div class="kpi-title">Active Positions</div>
             <div class="kpi-value text-cyan" id="kpi-open-pos">...</div>
-            <div class="kpi-sub">Futures & Spot Combined</div>
+            <div class="kpi-sub">Margin Exposure Active</div>
         </div>
         <div class="kpi-card">
             <div class="kpi-title">Total Portfolio Value</div>
             <div class="kpi-value" id="kpi-portfolio">...</div>
-            <div class="kpi-sub">Live Withdraw Pool: <span id="kpi-withdraw" class="text-profit">...</span></div>
+            <div class="kpi-sub">Mode: <span id="kpi-mode" class="text-warning">...</span></div>
         </div>
     </div>
 
-    <!-- Macro & Scanner Row -->
+    <!-- Institutional Radar (Widgets) -->
     <div class="widget-row">
-        <!-- BTC Macro Gate -->
+        <!-- Macro Gate -->
         <div class="widget">
-            <div class="widget-header">BTC MACRO GATE & ORDER FLOW</div>
+            <div class="widget-header">MACRO GATE & REGIME</div>
             <div class="macro-stats">
                 <span>Trend: <strong id="btc-trend">...</strong></span>
-                <span>Sentiment: <strong id="btc-sentiment">...</strong></span>
+                <span>Regime: <strong id="btc-regime" class="text-cyan">...</strong></span>
             </div>
             <div class="macro-stats" style="margin-bottom: 4px;">
-                <span class="text-profit">Buy Pressure: <span id="btc-buy">...</span></span>
-                <span class="text-loss">Sell Pressure: <span id="btc-sell">...</span></span>
+                <span class="text-profit">Buy Vol: <span id="btc-buy">...</span></span>
+                <span class="text-loss">Sell Vol: <span id="btc-sell">...</span></span>
             </div>
             <div class="pressure-bar">
                 <div class="pressure-buy" id="btc-bar" style="width: 50%;"></div>
             </div>
-            <div style="margin-top: 16px; font-size: 0.85rem;">
-                <span style="color: var(--text-muted);">Gate Status: </span>
-                <strong id="btc-gate" class="text-profit">...</strong>
+            <div class="macro-stats" style="margin-top: 12px; margin-bottom: 0;">
+                <span style="color: var(--text-muted);">ATR Volatility: <strong id="btc-atr" class="text-primary">...</strong></span>
+                <span style="color: var(--text-muted);">Status: <strong id="btc-gate" class="text-profit">...</strong></span>
             </div>
         </div>
 
-        <!-- Dynamic Scanner -->
+        <!-- Powder Keg (Futures) -->
         <div class="widget">
-            <div class="widget-header">DYNAMIC MARKET SCANNER</div>
-            <div style="font-size: 2.5rem; font-weight: 800; color: var(--text-primary);" id="scan-count">...</div>
-            <div style="font-size: 0.9rem; color: var(--text-secondary); margin-top: 8px;">
-                Actively tracking the most volatile, highly-liquid USDT pairs exchange-wide.
-            </div>
-            <div style="margin-top: 16px; font-size: 0.8rem; color: var(--text-muted); border-top: 1px solid var(--border-subtle); padding-top: 12px;">
-                Engine isolates assets with &gt;$10M Vol + VWAP Momentum Anomalies.
-            </div>
+            <div class="widget-header" style="color: var(--loss);">POWDER KEG HEATMAP (OI)</div>
+            <table class="mini-table">
+                <thead>
+                    <tr>
+                        <th>Asset</th>
+                        <th>Live Price</th>
+                        <th>OI/Spot Ratio</th>
+                    </tr>
+                </thead>
+                <tbody id="powder-tbody">
+                    <!-- JS Injected -->
+                </tbody>
+            </table>
+        </div>
+
+        <!-- SMC Battle Map (Spot) -->
+        <div class="widget">
+            <div class="widget-header" style="color: var(--profit);">SMC BATTLE MAP (SPOT)</div>
+            <table class="mini-table">
+                <thead>
+                    <tr>
+                        <th>Asset</th>
+                        <th>Type</th>
+                        <th>Direction</th>
+                        <th>Void Zone</th>
+                    </tr>
+                </thead>
+                <tbody id="smc-tbody">
+                    <!-- JS Injected -->
+                </tbody>
+            </table>
         </div>
     </div>
 
     <!-- Active Positions Table -->
     <div class="table-container">
-        <div style="font-size: 1.1rem; color: var(--accent-cyan); font-weight: 700; margin-bottom: 16px;">LIVE POSITIONS (GOD-MODE)</div>
+        <div style="font-size: 1.1rem; color: var(--accent-cyan); font-weight: 700; margin-bottom: 16px;">ACTIVE DEPLOYMENT LOG</div>
         <table>
             <thead>
                 <tr>
@@ -257,9 +338,9 @@
     </div>
 
     <!-- Bottom Split: History & Logs -->
-    <div class="widget-row">
+    <div class="widget-row" style="grid-template-columns: 1fr 1fr;">
         <div class="table-container" style="margin-bottom: 0;">
-            <div style="font-size: 1rem; color: var(--text-primary); font-weight: 700; margin-bottom: 16px;">RECENT CLOSES</div>
+            <div style="font-size: 1rem; color: var(--text-primary); font-weight: 700; margin-bottom: 16px;">RECENT EXITS</div>
             <table>
                 <thead>
                     <tr>
@@ -285,48 +366,160 @@
 </div>
 
 <script>
-    // Utility to format numbers safely
     const formatCurrency = (val) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(val);
+    
+    // Store positions globally for the Panic Button
+    let currentOpenPositions = [];
 
-    // Prompt for Admin Key
-    async function forceClose(tradeType, tradeId) {
-        const adminKey = prompt("Enter Admin Key to FORCE CLOSE this position:");
-        if (!adminKey) return;
+    // --- GOD MODE CONTROLS ---
 
+    async function toggleMode() {
+        const isLive = document.getElementById('live-toggle').checked;
+        const adminKey = prompt(`Enter Admin Key to switch to ${isLive ? "LIVE FUNDS" : "PAPER TRADING"}:`);
+        if (!adminKey) {
+            document.getElementById('live-toggle').checked = !isLive; // Revert visually
+            return;
+        }
         try {
-            const res = await fetch(`/api/trades/close/${tradeType}/${tradeId}`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json", "X-Admin-Key": adminKey }
+            const res = await fetch('/api/toggle-mode', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json', 'X-Admin-Key': adminKey},
+                body: JSON.stringify({paper_trading_enabled: isLive ? "0" : "1"})
             });
             const data = await res.json();
-            if (data.success || data.status === "success") {
-                alert("Position Force Closed Successfully.");
-                fetchData(); // Instantly refresh
+            if(data.error) {
+                alert(data.error);
+                document.getElementById('live-toggle').checked = !isLive;
             } else {
-                alert("Error: " + (data.error || "Failed to close"));
+                fetchData();
             }
-        } catch (e) {
-            alert("Network error.");
+        } catch(e) {
+            alert("Network Error");
+            document.getElementById('live-toggle').checked = !isLive;
         }
     }
 
+    async function toggleBTCGate() {
+        const override = document.getElementById('btc-override-toggle').checked;
+        const adminKey = prompt(`Enter Admin Key to ${override ? "FORCE OPEN" : "RESTORE"} the BTC Macro Gate:`);
+        if (!adminKey) {
+            document.getElementById('btc-override-toggle').checked = !override;
+            return;
+        }
+        try {
+            const res = await fetch('/api/toggle-btc-gate', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json', 'X-Admin-Key': adminKey},
+                body: JSON.stringify({override: override ? "1" : "0"})
+            });
+            const data = await res.json();
+            if(data.error) {
+                alert(data.error);
+                document.getElementById('btc-override-toggle').checked = !override;
+            } else {
+                fetchData();
+            }
+        } catch(e) {
+            alert("Network Error");
+            document.getElementById('btc-override-toggle').checked = !override;
+        }
+    }
+
+    async function forceClose(tradeType, tradeId) {
+        const adminKey = prompt("Enter Admin Key to FORCE CLOSE this position:");
+        if (!adminKey) return;
+        try {
+            const res = await fetch(`/api/trades/close/${tradeType}/${tradeId}`, {
+                method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Key": adminKey }
+            });
+            const data = await res.json();
+            if (data.status.includes("success")) fetchData();
+            else alert("Error: " + (data.error || "Failed to close"));
+        } catch (e) { alert("Network error."); }
+    }
+
+    async function panicSellAll() {
+        if(currentOpenPositions.length === 0) {
+            alert("No open positions to liquidate.");
+            return;
+        }
+        const adminKey = prompt(`DANGER: You are about to instantly market-sell ${currentOpenPositions.length} positions. Enter Admin Key to confirm:`);
+        if (!adminKey) return;
+
+        for (const p of currentOpenPositions) {
+            try {
+                await fetch(`/api/trades/close/${p.type}/${p.id}`, {
+                    method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Key": adminKey }
+                });
+            } catch(e) { console.error("Panic sell failed for ID", p.id); }
+        }
+        alert("Panic Execution Complete.");
+        fetchData();
+    }
+
+
+    // --- DATA PIPELINE ---
+
     async function fetchData() {
         try {
-            // 1. System Status & Macro
-            const resStatus = await fetch('/api/btc-sentiment');
+            // 1. System Status
+            const resStatus = await fetch('/api/status');
             const status = await resStatus.json();
             
-            document.getElementById('btc-trend').innerText = status.trend;
-            document.getElementById('btc-trend').className = status.trend === 'BULLISH' ? 'text-profit' : (status.trend === 'BEARISH' ? 'text-loss' : 'text-cyan');
-            document.getElementById('btc-sentiment').innerText = status.sentiment;
-            document.getElementById('btc-buy').innerText = status.buy_pressure;
-            document.getElementById('btc-sell').innerText = status.sell_pressure;
-            document.getElementById('btc-bar').style.width = status.buy_pressure;
+            document.getElementById('sys-status').innerText = status.status;
+            document.getElementById('sys-status').className = status.status === 'HALTED' ? 'badge offline' : 'badge online';
             
-            document.getElementById('btc-gate').innerText = status.computed_allow ? "ALLOW" : "BLOCK";
-            document.getElementById('btc-gate').className = status.computed_allow ? "text-profit" : "text-loss";
+            document.getElementById('kpi-mode').innerText = status.execution_mode;
+            document.getElementById('live-toggle').checked = (status.execution_mode === "LIVE TRADING");
+            
+            document.getElementById('btc-regime').innerText = status.macro_regime;
+            document.getElementById('btc-gate').innerText = status.btc_gate_allowed ? "ALLOW" : "BLOCK";
+            document.getElementById('btc-gate').className = status.btc_gate_allowed ? "text-profit" : "text-loss";
 
-            // 2. Statistics
+            // 2. Macro Sentiment
+            const resSent = await fetch('/api/btc-sentiment');
+            const sent = await resSent.json();
+            
+            document.getElementById('btc-trend').innerText = sent.trend;
+            document.getElementById('btc-trend').className = sent.trend === 'BULLISH' ? 'text-profit' : (sent.trend === 'BEARISH' ? 'text-loss' : 'text-cyan');
+            document.getElementById('btc-buy').innerText = sent.buy_pressure;
+            document.getElementById('btc-sell').innerText = sent.sell_pressure;
+            document.getElementById('btc-bar').style.width = sent.buy_pressure;
+            document.getElementById('btc-atr').innerText = sent.atr;
+
+            // 3. Powder Keg Heatmap
+            const resPowder = await fetch('/api/market/powder-keg');
+            const powders = await resPowder.json();
+            const tbodyPowder = document.getElementById('powder-tbody');
+            tbodyPowder.innerHTML = "";
+            if(powders.length === 0) tbodyPowder.innerHTML = `<tr><td colspan="3" style="text-align: center; color: var(--text-muted);">No Extreme OI Detected</td></tr>`;
+            powders.forEach(p => {
+                tbodyPowder.innerHTML += `
+                    <tr>
+                        <td style="font-weight:700;">${p.pair}</td>
+                        <td class="font-mono">$${p.last_price.toFixed(4)}</td>
+                        <td class="font-mono text-loss">${p.oi_spot_ratio.toFixed(2)}x</td>
+                    </tr>`;
+            });
+
+            // 4. SMC Battle Map
+            const resSmc = await fetch('/api/market/smc-zones');
+            const smcs = await resSmc.json();
+            const tbodySmc = document.getElementById('smc-tbody');
+            tbodySmc.innerHTML = "";
+            if(smcs.length === 0) tbodySmc.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--text-muted);">Mapping Voids...</td></tr>`;
+            smcs.forEach(s => {
+                const dClass = s.direction === 'BULLISH' ? 'text-profit' : 'text-loss';
+                tbodySmc.innerHTML += `
+                    <tr>
+                        <td style="font-weight:700;">${s.pair}</td>
+                        <td class="font-mono" style="font-size:0.7rem;">${s.pool_type}</td>
+                        <td class="${dClass}" style="font-size:0.75rem;">${s.direction}</td>
+                        <td class="font-mono" style="font-size:0.75rem;">$${s.bottom_price.toFixed(4)} - $${s.top_price.toFixed(4)}</td>
+                    </tr>`;
+            });
+
+            // 5. Statistics
             const resSpotStat = await fetch('/api/statistics');
             const spotStat = await resSpotStat.json();
             const resFutStat = await fetch('/api/futures/statistics');
@@ -342,35 +535,25 @@
 
             document.getElementById('kpi-open-pos').innerText = futStat.open_positions + spotStat.open_positions;
             document.getElementById('kpi-portfolio').innerText = formatCurrency(futStat.portfolio_value + spotStat.portfolio_value);
-            document.getElementById('kpi-withdraw').innerText = formatCurrency(futStat.live_withdraw);
 
-            // Fetch Scanner Count via System API
-            const resSys = await fetch('/api/status');
-            // Assuming we added scanner count to general status or we can derive it. 
-            // *Wait, we need to ping the new unified /api/system_status if available, but let's use the UI element manually if missing*
-            document.getElementById('scan-count').innerText = "50"; // Hardcoded to config max for UI display purposes
-
-            // 3. Live Positions
+            // 6. Live Positions
             const resPos = await fetch('/api/positions');
             const positions = await resPos.json();
+            currentOpenPositions = positions; // Save for Panic Button
             
             const tbodyPos = document.getElementById('positions-tbody');
             tbodyPos.innerHTML = "";
             
             if (positions.length === 0) {
-                tbodyPos.innerHTML = `<tr><td colspan="9" style="text-align: center; color: var(--text-muted);">No active positions. Scanning markets...</td></tr>`;
+                tbodyPos.innerHTML = `<tr><td colspan="9" style="text-align: center; color: var(--text-muted);">No active positions. Scanning matrices...</td></tr>`;
             } else {
                 positions.forEach(p => {
                     const isProfit = p.pnl_usdt >= 0;
                     const pnlClass = isProfit ? "text-profit" : "text-loss";
                     const tagClass = p.direction === "LONG" ? "long" : (p.direction === "SHORT" ? "short" : "spot");
                     
-                    const tp1Class = p.tp1 ? "active" : "";
-                    const tp2Class = p.tp2 ? "active" : "";
-                    const tp3Class = p.tp3 ? "active" : "";
-
                     const peakWorst = p.type === "futures" 
-                        ? `<span class="text-profit font-mono">+${p.peak_roi.toFixed(1)}%</span> / <span class="text-loss font-mono">${p.worst_roi.toFixed(1)}%</span>`
+                        ? `<span class="text-profit font-mono">+${p.peak_roi.toFixed(1)}%</span> / <span class="text-loss font-mono">${(p.worst_roi || 0).toFixed(1)}%</span>`
                         : `<span style="color: var(--text-muted)">N/A (Spot)</span>`;
 
                     tbodyPos.innerHTML += `
@@ -383,9 +566,9 @@
                             <td class="${pnlClass} font-mono font-weight-700">${p.pnl_formatted}</td>
                             <td>${peakWorst}</td>
                             <td>
-                                <span class="tp-badge ${tp1Class}">1</span>
-                                <span class="tp-badge ${tp2Class}">2</span>
-                                <span class="tp-badge ${tp3Class}">3</span>
+                                <span class="tp-badge ${p.tp1 ? "active" : ""}">1</span>
+                                <span class="tp-badge ${p.tp2 ? "active" : ""}">2</span>
+                                <span class="tp-badge ${p.tp3 ? "active" : ""}">3</span>
                             </td>
                             <td>
                                 <button class="btn-close" onclick="forceClose('${p.type}', ${p.id})">Force Close</button>
@@ -395,7 +578,7 @@
                 });
             }
 
-            // 4. Trade History (Futures only for visual brevity, or mixed)
+            // 7. Trade History
             const resHist = await fetch('/api/futures/trades?limit=8');
             const history = await resHist.json();
             const tbodyHist = document.getElementById('history-tbody');
@@ -403,20 +586,17 @@
 
             history.forEach(h => {
                 const isProfit = h.pnl.includes('+');
-                const pnlClass = isProfit ? "text-profit" : "text-loss";
-                const tagClass = h.direction === "LONG" ? "long" : "short";
-
                 tbodyHist.innerHTML += `
                     <tr>
                         <td style="font-weight: 700;">${h.pair}</td>
-                        <td><span class="tag ${tagClass}">${h.type}</span></td>
+                        <td><span class="tag ${h.direction === 'LONG' ? 'long' : 'short'}">${h.type}</span></td>
                         <td class="font-mono">${h.exit}</td>
-                        <td class="${pnlClass} font-mono">${h.pnl}</td>
+                        <td class="${isProfit ? 'text-profit' : 'text-loss'} font-mono">${h.pnl}</td>
                     </tr>
                 `;
             });
 
-            // 5. Logs
+            // 8. Logs
             const resLogs = await fetch('/api/logs?limit=50');
             const logs = await resLogs.json();
             const logBox = document.getElementById('logs-box');
@@ -431,14 +611,11 @@
                 `;
             });
 
-        } catch (e) {
-            console.error("UI Fetch Error:", e);
-        }
+        } catch (e) { console.error("UI Fetch Error:", e); }
     }
 
-    // Refresh dashboard data every 3 seconds
     setInterval(fetchData, 3000);
-    fetchData(); // Initial load
+    fetchData(); 
 </script>
 </body>
 </html>

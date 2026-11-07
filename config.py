@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 import ccxt
 
 # ==============================================================================
-# APEXTICK: INSTITUTIONAL SCALPING & ACCUMULATION ENGINE
+# APEXTICK: INSTITUTIONAL SCALPING & QUANTITATIVE ENGINE
 # ==============================================================================
 
 # --- ENVIRONMENT SETUP ---
@@ -19,16 +19,13 @@ ADMIN_KEY = os.getenv("ADMIN_KEY", "secret_key_here")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", str(BASE_DIR / "apextick.db"))
 
-# --- SYSTEM EXECUTION MODE (THE MASTER TOGGLE) ---
-# True = Scans LIVE market, logs trades to local SQLite database using fake portfolio.
-# False = Sends live orders to Binance using real capital and API keys.
-PAPER_TRADING = True 
-
 # --- LIVE TRADING CREDENTIALS ---
-# Load your real Binance API keys here. 
-# (When PAPER_TRADING=True, these are only used to fetch live unrestricted market data).
+# (PAPER_TRADING master toggle has been moved to the live SQLite 'bot_settings' table for UI God-Mode control).
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY", "")
+
+# --- ECONOMIC NLP API (For the Macro Kill-Switch) ---
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "") # Will be used by macro_calendar.py
 
 # --- CCXT LIVE BINANCE CLIENT ---
 exchange = ccxt.binance({
@@ -36,19 +33,17 @@ exchange = ccxt.binance({
     "secret": BINANCE_SECRET_KEY,
     "enableRateLimit": True,
     "options": {
-        "defaultType": "swap",  # Prioritizes LIVE USDT-M Futures market (swap) over spot
+        "defaultType": "swap",  # Prioritizes LIVE USDT-M Futures market
         "adjustForTimeDifference": True,
         "recvWindow": 10000,
     },
 })
-# NOTE: The hardcoded exchange.urls block for Testnet/Demo has been COMPLETELY REMOVED.
-# This forces the CCXT client to pull data from the unrestricted live Binance Mainnet.
 
 # --- SPOT TRADING ENGINE CONFIGURATION (The Accumulator) ---
 SPOT_CONFIG = {
-    "capital_cap_usdt": 100.0,
-    "trade_size_pct": 18.0,          # 18% of $100 = $18.00 per entry
-    "min_trade_usdt": 17.0,          # Guarantees 30% TP1 scale-out >= $5.10
+    "capital_cap_usdt": 150.0,       # Updated to exactly $150 base balance
+    "trade_size_pct": 12.0,          # 12% of $150 = $18.00 per entry
+    "min_trade_usdt": 17.0,          # Guarantees scale-outs remain valid on Binance
     "max_open_positions": 5,
     "fee_pct": 0.1,                  
     "tp1_pct": 2.0,                  
@@ -56,14 +51,15 @@ SPOT_CONFIG = {
     "tp3_pct": 6.0,                  
     "tp1_close_ratio": 0.30,
     "tp2_close_ratio": 0.40,
-    "never_close_below_tp": True,    # Forces reliance on exact Demand Zone/VWAP entries
+    "never_close_below_tp": True,    # Forces reliance on exact Demand Zone entries
 }
 
 # --- USDT-M FUTURES TRADING ENGINE CONFIGURATION (The Sniper) ---
 FUTURES_CONFIG = {
+    "capital_cap_usdt": 150.0,       # Updated to exactly $150 base balance
     "leverage": 15,
-    "margin_size_pct": 2.0,          # 2% of $50 = $1 margin per position
-    "min_margin_usdt": 0.4,          # Lowered so your $1.00 margin isn't blocked internally
+    "margin_size_pct": 2.0,          # 2% of $150 = $3.00 margin per position base (modified by ATR)
+    "min_margin_usdt": 0.4,          
     "max_open_positions": 5,         
     "fee_pct": 0.05,                 
     "withdraw_split_pct": 0.70,      
@@ -86,6 +82,36 @@ FUTURES_CONFIG = {
     "recovery_tp_roi_pct": 0.50,     
 }
 
+# --- DYNAMIC RISK MANAGEMENT (ATR SIZING) ---
+DYNAMIC_RISK_CONFIG = {
+    "enabled": True,
+    "atr_lookback": 14,              # 14-period True Range for volatility check
+    "max_margin_pct": 4.0,           # Max exposure when market is calm/predictable
+    "min_margin_pct": 0.5,           # Min exposure when volatility is extremely high
+}
+
+# --- THE POWDER KEG DETECTOR (Liquidation Hunter) ---
+POWDER_KEG_CONFIG = {
+    "enabled": True,
+    "min_oi_spot_ratio": 5.0,        # Trigger if Open Interest is 5x larger than Spot Volume
+    "liquidation_trap_distance": 1.5 # Wait for price to drop 1.5% to confirm margin calls have started
+}
+
+# --- SMART MONEY CONCEPTS (SMC) MAPPING ---
+SMC_CONFIG = {
+    "enabled": True,
+    "lookback_candles": 40,          # Rolling array size for structural mapping
+    "min_fvg_pct_gap": 0.2,          # Minimum size required to register a Fair Value Gap
+    "ob_mitigation_buffer": 0.1,     # Tolerance % for price hitting an Order Block
+}
+
+# --- MACRO CALENDAR (The NLP Kill-Switch) ---
+MACRO_CALENDAR_CONFIG = {
+    "enabled": True,
+    "flatten_before_minutes": 5,     # Market-sell all positions 5 minutes before high-impact news
+    "resume_after_minutes": 15,      # Keep execution engines paused until 15 minutes after news
+}
+
 # --- BTC MACRO GATE SETTINGS (The 1H Trend Bias) ---
 BTC_GATE_CONFIG = {
     "enabled": True,
@@ -93,30 +119,30 @@ BTC_GATE_CONFIG = {
     "max_sell_pressure_pct": 80.0,
     
     # Required by btc_decline_signal.py eval_decline_from_closes()
-    "min_bars": 5,           # Minimum klines required to evaluate
-    "baseline_bars": 24,     # Baseline lookback window
-    "tail": 5,               # Recent candles to evaluate for volume
-    "vol_mult": 1.5,         # Multiplier to detect volume spikes
-    "red_look": 5,           # Number of recent candles to inspect
-    "red_need": 3,           # Number of red candles needed to trigger soft decline
-    "nuclear_4h": -8.0,      # Trigger block if 4h drop exceeds this %
-    "soft_4h": -4.0,         # Soft 4h drop threshold
-    "soft_1h": -2.0,         # Soft 1h drop threshold
+    "min_bars": 5,           
+    "baseline_bars": 24,     
+    "tail": 5,               
+    "vol_mult": 1.5,         
+    "red_look": 5,           
+    "red_need": 3,           
+    "nuclear_4h": -8.0,      
+    "soft_4h": -4.0,         
+    "soft_1h": -2.0,         
     
     # Required by btc_decline_signal.py _recalc_pressure()
-    "window_ms": 60000       # Rolling 60-second window for buy/sell pressure
+    "window_ms": 60000       
 }
 
-# --- DYNAMIC MARKET SCANNER SETTINGS (Replaces Hard-Coded Watchlist) ---
+# --- DYNAMIC MARKET SCANNER SETTINGS ---
 MARKET_SCANNER_CONFIG = {
     "enabled": True,
-    "refresh_interval_minutes": 0.5,     # 0.5 minutes = 30 seconds tick rate
-    "min_24h_volume_usdt": 3_000_000,    # Lowered to $3M to catch a wider pool of volatile altcoins
-    "top_n_coins": 50,                   # The ultimate pool size of active, high-volume pairs to track in the DB
+    "refresh_interval_minutes": 0.5,     # 30 seconds tick rate
+    "min_24h_volume_usdt": 3_000_000,    
+    "top_n_coins": 50,                   
     
     # Order-Flow / Volatility Micro-Triggers
-    "min_momentum_pct": 1.5,             # Lowered from 3.0% to catch standard intraday moves
-    "max_overextended_pct": 25.0,        # Mean Reversion: Ignore coins already up/down > 25% to avoid tops/bottoms
-    "vwap_tolerance_pct": 1.5,           # Widened from 0.5% to allow slightly looser entries around the VWAP
-    "volume_spike_multiplier": 1.0,      # FIXED: Brought down to 1.0 from 10 to ensure it fires on normal breakouts
+    "min_momentum_pct": 1.5,             
+    "max_overextended_pct": 25.0,        
+    "vwap_tolerance_pct": 100.0,         # Wide for testing, restricted by SMC engine
+    "volume_spike_multiplier": 0.0,      
 }

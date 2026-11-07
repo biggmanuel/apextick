@@ -24,6 +24,7 @@ MARKET_STATE = {
     "btc_24h_change": 1.25,
     "btc_sentiment": "NEUTRAL",
     "btc_trend": "BULLISH",
+    "btc_atr_1h": 0.0,             # NEW: Institutional Volatility Tracking
     "computed_allow": True,
     "computed_reason": "ApexTick baseline active (Waiting for WebSocket ticks)",
     "klines_1h": [],       
@@ -36,6 +37,8 @@ MARKET_STATE = {
 
 def ensure_pairs_table():
     pk_type = "SERIAL PRIMARY KEY" if IS_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    
+    # 1. Ensure base table exists
     execute_query(
         f"""
         CREATE TABLE IF NOT EXISTS trading_pairs (
@@ -53,26 +56,41 @@ def ensure_pairs_table():
         """,
         commit=True
     )
+    
+    # 2. Institutional Upgrade: Injecting new columns dynamically if they don't exist
+    new_columns = {
+        "oi_usd": "REAL DEFAULT 0.0",
+        "oi_spot_ratio": "REAL DEFAULT 0.0",
+        "atr": "REAL DEFAULT 0.0"
+    }
+    for col, col_type in new_columns.items():
+        try:
+            execute_query(f"ALTER TABLE trading_pairs ADD COLUMN {col} {col_type}", commit=True)
+        except Exception:
+            pass  # Column already exists, safe to ignore
 
 def sync_binance_pairs():
     """
     THE GLOBAL NET:
     Pings all active Binance USDT markets, filters for institutional liquidity, 
-    and ranks the top volatile coins dynamically.
+    calculates Open Interest (OI) Powder Keg ratios, and ranks volatile coins dynamically.
     """
     ensure_pairs_table()
     now_str = datetime.now(timezone.utc).isoformat()
     
-    # Load parameters from the new Dynamic Scanner Config
     min_vol_usd = MARKET_SCANNER_CONFIG.get("min_24h_volume_usdt", 3_000_000)
     max_pairs = MARKET_SCANNER_CONFIG.get("top_n_coins", 50)
     
     candidates = {}
 
     try:
-        exchange = ccxt.binance({'enableRateLimit': True, 'timeout': 10000})
-        markets = exchange.load_markets()
-        tickers = exchange.fetch_tickers()
+        # Dual-Client setup for precise Spot/Futures mapping
+        spot_client = ccxt.binance({'enableRateLimit': True, 'timeout': 10000})
+        fut_client = ccxt.binance({'options': {'defaultType': 'swap'}, 'enableRateLimit': True, 'timeout': 10000})
+        
+        markets = spot_client.load_markets()
+        fut_markets = fut_client.load_markets()
+        tickers = spot_client.fetch_tickers()
         
         for symbol, market in markets.items():
             if not market.get('quote') == 'USDT' or not market.get('active'):
@@ -83,8 +101,12 @@ def sync_binance_pairs():
                 continue
             
             pair_str = f"{base}/USDT"
+            
+            # CCXT Unified format for Binance USDT-M Futures is BASE/QUOTE:SETTLE
+            fut_symbol = f"{base}/USDT:USDT" 
+            
             is_spot = 1 if market.get('spot') else 0
-            is_fut = 1 if market.get('linear') else 0
+            is_fut = 1 if fut_symbol in fut_markets else 0
             
             ticker_info = tickers.get(symbol, {})
             last_p = float(ticker_info.get('last', 0) or 0)
@@ -109,22 +131,43 @@ def sync_binance_pairs():
                 candidates[pair_str] = {
                     "pair": pair_str, "spot": is_spot, "futures": is_fut,
                     "chg": chg_24, "vol": vol_24, "price": last_p,
+                    "oi_usd": 0.0, "oi_spot_ratio": 0.0
                 }
                 
     except Exception as e:
         add_log("WARNING", "apextick_bot", f"Scanner API Blocked or Timeout. Retaining current Hot List. ({e})")
         return 0
 
-    # Sort strictly by 24h Volume (Highest Liquidity First) and cap at Top N
+    # Sort strictly by 24h Volume and cap at Top N
     sorted_pairs = sorted(candidates.values(), key=lambda x: x["vol"], reverse=True)[:max_pairs]
     
     if not sorted_pairs:
         return 0
 
-    # Clean Slate: Deactivate all old pairs, we only want the explosive ones active
+    # --- THE POWDER KEG DETECTOR (Open Interest Extraction) ---
+    for p in sorted_pairs:
+        if p["futures"] == 1:
+            try:
+                fut_symbol = f"{p['pair'].split('/')[0]}/USDT:USDT"
+                oi_data = fut_client.fetch_open_interest(fut_symbol)
+                
+                # Extract USD value of outstanding leverage contracts
+                if oi_data and 'openInterestValue' in oi_data:
+                    p["oi_usd"] = float(oi_data['openInterestValue'])
+                elif oi_data and 'openInterestAmount' in oi_data:
+                    p["oi_usd"] = float(oi_data['openInterestAmount']) * p["price"]
+                
+                # Calculate the liquidation imbalance ratio
+                if p["vol"] > 0:
+                    p["oi_spot_ratio"] = p["oi_usd"] / p["vol"]
+                    
+            except Exception:
+                pass
+            time.sleep(0.05) # Anti-rate-limit spacing
+
+    # Clean Slate: Deactivate all old pairs
     execute_query("UPDATE trading_pairs SET status = 'INACTIVE'", commit=True)
     
-    added_count = 0
     for p in sorted_pairs:
         existing = execute_query("SELECT id FROM trading_pairs WHERE pair = ?", (p["pair"],), fetch_one=True)
         if existing:
@@ -132,35 +175,50 @@ def sync_binance_pairs():
                 """
                 UPDATE trading_pairs 
                 SET status = 'ACTIVE', spot_supported = ?, futures_supported = ?, 
-                    change_24h_pct = ?, volume_24h_usd = ?, last_price = ?, updated_at = ? 
+                    change_24h_pct = ?, volume_24h_usd = ?, last_price = ?, 
+                    oi_usd = ?, oi_spot_ratio = ?, updated_at = ? 
                 WHERE pair = ?
                 """,
-                (p["spot"], p["futures"], p["chg"], p["vol"], p["price"], now_str, p["pair"]), commit=True
+                (p["spot"], p["futures"], p["chg"], p["vol"], p["price"], p["oi_usd"], p["oi_spot_ratio"], now_str, p["pair"]), commit=True
             )
         else:
             execute_query(
                 """
                 INSERT INTO trading_pairs 
-                (pair, status, spot_supported, futures_supported, change_24h_pct, volume_24h_usd, last_price, reason, updated_at) 
-                VALUES (?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?)
+                (pair, status, spot_supported, futures_supported, change_24h_pct, volume_24h_usd, last_price, oi_usd, oi_spot_ratio, reason, updated_at) 
+                VALUES (?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (p["pair"], p["spot"], p["futures"], p["chg"], p["vol"], p["price"], "Dynamic Hot List Scan", now_str), commit=True
+                (p["pair"], p["spot"], p["futures"], p["chg"], p["vol"], p["price"], p["oi_usd"], p["oi_spot_ratio"], "Dynamic Hot List Scan", now_str), commit=True
             )
-        added_count += 1
 
-    add_log("INFO", "apextick_bot", f"Market Scan Complete: Tracked Top {len(sorted_pairs)} Liquid Pairs.")
+    add_log("INFO", "apextick_bot", f"Market Scan Complete: Tracked Top {len(sorted_pairs)} Liquid Pairs with OI Matrices.")
     return len(sorted_pairs)
 
 def eval_decline_from_closes() -> dict:
     klines = MARKET_STATE["klines_1h"]
     cfg = BTC_GATE_CONFIG
     
+    # --- ATR VOLATILITY CALCULATOR ---
+    if len(klines) >= 15:
+        tr_list = []
+        for i in range(1, len(klines)):
+            h = klines[i]["h"]
+            l = klines[i]["l"]
+            prev_c = klines[i-1]["c"]
+            # True Range = Max(H-L, |H-Cp|, |L-Cp|)
+            tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
+            tr_list.append(tr)
+        
+        # 14-Period Average True Range (ATR)
+        recent_trs = tr_list[-14:]
+        MARKET_STATE["btc_atr_1h"] = sum(recent_trs) / len(recent_trs)
+
     if len(klines) < cfg["min_bars"]:
         if not klines:
             base_p = MARKET_STATE["btc_price"]
             now_t = int(time.time() * 1000)
             for i in range(40):
-                MARKET_STATE["klines_1h"].append({"t": now_t - ((40 - i) * 3600 * 1000), "o": base_p, "c": base_p, "v": 1000.0})
+                MARKET_STATE["klines_1h"].append({"t": now_t - ((40 - i) * 3600 * 1000), "o": base_p, "h": base_p, "l": base_p, "c": base_p, "v": 1000.0})
         return {"block": False, "reason": "ApexTick baseline active (Allowing trades)"}
 
     c = [x["c"] for x in klines]
@@ -204,7 +262,8 @@ def backfill_btc_history():
         exchange = ccxt.binance({'timeout': 5000})
         ohlcv = exchange.fetch_ohlcv('BTC/USDT', timeframe='1h', limit=60)
         if ohlcv:
-            MARKET_STATE["klines_1h"] = [{"t": int(k[0]), "o": float(k[1]), "c": float(k[4]), "v": float(k[5])} for k in ohlcv]
+            # Capturing High (k[2]) and Low (k[3]) for ATR calculations
+            MARKET_STATE["klines_1h"] = [{"t": int(k[0]), "o": float(k[1]), "h": float(k[2]), "l": float(k[3]), "c": float(k[4]), "v": float(k[5])} for k in ohlcv]
             MARKET_STATE["btc_price"] = float(ohlcv[-1][4])
             ev = eval_decline_from_closes()
             MARKET_STATE["computed_allow"] = not ev["block"]
@@ -212,7 +271,7 @@ def backfill_btc_history():
     except Exception:
         base_p = MARKET_STATE["btc_price"]
         now_t = int(time.time() * 1000)
-        MARKET_STATE["klines_1h"] = [{"t": now_t - (i * 3600 * 1000), "o": base_p, "c": base_p, "v": 1500.0} for i in range(40, 0, -1)]
+        MARKET_STATE["klines_1h"] = [{"t": now_t - (i * 3600 * 1000), "o": base_p, "h": base_p, "l": base_p, "c": base_p, "v": 1500.0} for i in range(40, 0, -1)]
 
 def _recalc_pressure():
     now_ms = int(time.time() * 1000)
@@ -238,7 +297,6 @@ def is_trading_allowed_by_btc_gate() -> tuple[bool, str]:
     if not decline_enabled:
         return True, f"Decline signal OFF (Computed: {'ALLOW' if not ev['block'] else 'BLOCK'})"
     
-    # We must also enforce the buy/sell pressure limits set in config.py
     if MARKET_STATE["buy_pressure_pct"] < BTC_GATE_CONFIG["min_buy_pressure_pct"]:
         return False, f"Buy pressure ({MARKET_STATE['buy_pressure_pct']}%) below minimum ({BTC_GATE_CONFIG['min_buy_pressure_pct']}%)"
         
@@ -363,11 +421,12 @@ def start_btc_stream_background():
             except Exception:
                 pass
 
-    # --- THE DYNAMIC SCANNER LOOP ---
     def dynamic_scanner_loop():
         interval = MARKET_SCANNER_CONFIG.get("refresh_interval_minutes", 0.5) * 60
         while True:
             try:
+                # Keep BTC history fresh so ATR and Decline signals don't go stale
+                backfill_btc_history() 
                 sync_binance_pairs()
             except Exception as e:
                 add_log("ERROR", "apextick_bot", f"Scanner Loop Error: {e}")
@@ -376,14 +435,13 @@ def start_btc_stream_background():
     threading.Thread(target=ws_btc_loop, daemon=True).start()
     threading.Thread(target=ws_ticker_loop, daemon=True).start()
     threading.Thread(target=db_price_sync_loop, daemon=True).start()
-    threading.Thread(target=dynamic_scanner_loop, daemon=True).start() # Added the background scanner thread
+    threading.Thread(target=dynamic_scanner_loop, daemon=True).start() 
 
 if __name__ == "__main__":
-    print("Initializing Core Systems...")
+    print("Initializing Institutional Data Core...")
     backfill_btc_history()
-    # Run the scanner immediately on boot to build the first Hot List
     sync_binance_pairs() 
     start_btc_stream_background()
-    print("Dynamic Market Scanner and WebSockets connected. Live prices syncing.")
+    print("Dynamic Market Scanner, OI Matrix, and WebSockets connected.")
     while True:
         time.sleep(1)

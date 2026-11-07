@@ -5,7 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # =============================================================================
-# APEXTICK: MASTER DATABASE CONFIGURATION
+# APEXTICK: MASTER DATABASE CONFIGURATION (INSTITUTIONAL QUANT SCHEMA)
 # =============================================================================
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -56,7 +56,7 @@ def execute_query(query: str, params: tuple = (), fetch_one: bool = False, fetch
 def init_db():
     """
     Initializes the database schema. 
-    Upgraded to support peak/worst ROI tracking, dynamic pair volumes, and LIVE/PAPER mode distinction.
+    Upgraded for Smart Money Concepts (SMC), Regime Detection, and Live Toggles.
     """
     pk = "SERIAL PRIMARY KEY" if IS_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
     
@@ -68,15 +68,15 @@ def init_db():
             display_name TEXT NOT NULL,
             spot_enabled INTEGER DEFAULT 1,
             futures_enabled INTEGER DEFAULT 1,
-            spot_balance_usdt REAL DEFAULT 100.0,
-            spot_capital_cap REAL DEFAULT 100.0,
-            futures_balance_usdt REAL DEFAULT 50.0,
-            futures_capital_cap REAL DEFAULT 50.0,
+            spot_balance_usdt REAL DEFAULT 150.0,
+            spot_capital_cap REAL DEFAULT 150.0,
+            futures_balance_usdt REAL DEFAULT 150.0,
+            futures_capital_cap REAL DEFAULT 150.0,
             futures_live_withdraw REAL DEFAULT 0.0
         )
     """, commit=True)
 
-    # 2. Dynamic Trading Pairs (Populated by btc_decline_signal.py)
+    # 2. Dynamic Trading Pairs (Upgraded with OI Matrix and ATR)
     execute_query(f"""
         CREATE TABLE IF NOT EXISTS trading_pairs (
             id {pk},
@@ -87,12 +87,27 @@ def init_db():
             change_24h_pct REAL DEFAULT 0.0,
             volume_24h_usd REAL DEFAULT 0.0,
             last_price REAL DEFAULT 0.0,
+            oi_usd REAL DEFAULT 0.0,
+            oi_spot_ratio REAL DEFAULT 0.0,
+            atr REAL DEFAULT 0.0,
             reason TEXT DEFAULT 'Dynamic Market Scan',
             updated_at TEXT NOT NULL
         )
     """, commit=True)
 
-    # 3. Spot Trades (Upgraded for remaining_qty, TP3, and Paper/Live separation)
+    # --- DYNAMIC MIGRATION: Safely inject OI and ATR columns if upgrading an old SQLite file ---
+    new_pair_columns = {
+        "oi_usd": "REAL DEFAULT 0.0",
+        "oi_spot_ratio": "REAL DEFAULT 0.0",
+        "atr": "REAL DEFAULT 0.0"
+    }
+    for col, col_type in new_pair_columns.items():
+        try:
+            execute_query(f"ALTER TABLE trading_pairs ADD COLUMN {col} {col_type}", commit=True)
+        except Exception:
+            pass # Column already exists, proceed normally
+
+    # 3. Spot Trades (Upgraded for SMC execution and Paper/Live separation)
     execute_query(f"""
         CREATE TABLE IF NOT EXISTS spot_trades (
             id {pk},
@@ -115,7 +130,7 @@ def init_db():
         )
     """, commit=True)
 
-    # 4. Futures Trades (Upgraded for Micro-Risk, Peak/Worst Tracking, and Paper/Live separation)
+    # 4. Futures Trades (Upgraded for Trailing Peaks and Liquidation Hunting)
     execute_query(f"""
         CREATE TABLE IF NOT EXISTS futures_trades (
             id {pk},
@@ -154,7 +169,7 @@ def init_db():
         )
     """, commit=True)
 
-    # 6. Bot Settings (Toggles)
+    # 6. Bot Settings (God-Mode Toggles)
     execute_query(f"""
         CREATE TABLE IF NOT EXISTS bot_settings (
             key TEXT PRIMARY KEY,
@@ -163,8 +178,37 @@ def init_db():
         )
     """, commit=True)
 
-    # --- SEED DEFAULT ACCOUNT ---
-    # Ensure your single-account setup is perfectly seeded with the correct budget
+    # 7. Liquidity Pools (NEW: Smart Money Concepts Mapping)
+    execute_query(f"""
+        CREATE TABLE IF NOT EXISTS liquidity_pools (
+            id {pk},
+            pair TEXT NOT NULL,
+            pool_type TEXT NOT NULL,      -- 'FVG' or 'ORDER_BLOCK'
+            direction TEXT NOT NULL,      -- 'BULLISH' or 'BEARISH'
+            top_price REAL NOT NULL,
+            bottom_price REAL NOT NULL,
+            status TEXT DEFAULT 'PENDING',-- 'PENDING', 'MITIGATED', 'INVALIDATED'
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """, commit=True)
+
+    # 8. Market Regimes (NEW: Trend vs Range State Machine)
+    execute_query(f"""
+        CREATE TABLE IF NOT EXISTS market_regimes (
+            id {pk},
+            pair TEXT UNIQUE NOT NULL,
+            regime TEXT DEFAULT 'TRENDING',    -- 'TRENDING' or 'RANGING'
+            volatility_state TEXT DEFAULT 'LOW', -- 'LOW', 'HIGH', 'EXTREME'
+            updated_at TEXT NOT NULL
+        )
+    """, commit=True)
+
+
+    # --- SEED DEFAULT DATA ---
+    now_str = datetime.now(timezone.utc).isoformat()
+    
+    # Ensure Account matches $150 Capital requirements
     existing_acct = execute_query("SELECT id FROM accounts WHERE account_id = 'Emmanuel_Paper_150'", fetch_one=True)
     if not existing_acct:
         execute_query("""
@@ -173,8 +217,19 @@ def init_db():
                 spot_balance_usdt, spot_capital_cap, 
                 futures_balance_usdt, futures_capital_cap, futures_live_withdraw
             ) VALUES (?, ?, 1, 1, ?, ?, ?, ?, 0.0)
-        """, ("Emmanuel_Paper_150", "Emmanuel ($150)", 100.0, 100.0, 50.0, 50.0), commit=True)
+        """, ("Emmanuel_Paper_150", "Emmanuel ($150)", 150.0, 150.0, 150.0, 150.0), commit=True)
 
+    # Pre-Seed the God-Mode Dashboard Toggles
+    default_settings = [
+        ('paper_trading_enabled', '1'),
+        ('btc_gate_override', '0')
+    ]
+    for key, val in default_settings:
+        execute_query(
+            "INSERT OR IGNORE INTO bot_settings (key, value, updated_at) VALUES (?, ?, ?)",
+            (key, val, now_str),
+            commit=True
+        )
 
 def add_log(level: str, source: str, message: str):
     """Inserts a system log and prints it to the console."""
@@ -192,4 +247,4 @@ def add_log(level: str, source: str, message: str):
 
 if __name__ == "__main__":
     init_db()
-    print("ApexTick Database Initialized with Advanced Scalping Metrics & Trade Modes.")
+    print("ApexTick Database Initialized with Smart Money Concepts, Regime Tracking, and God-Mode UI Memory.")
