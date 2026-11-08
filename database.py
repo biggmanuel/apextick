@@ -1,376 +1,266 @@
 import os
-import time
-import threading
-import logging
+import sqlite3
 from datetime import datetime, timezone
-from flask import Flask, render_template, request, jsonify
-
-# --- APEXTICK CORE IMPORTS ---
-from config import BOT_NAME, ADMIN_KEY, MARKET_SCANNER_CONFIG
-from database import init_db, execute_query, add_log
-
-from btc_decline_signal import (
-    start_btc_stream_background, backfill_btc_history,
-    sync_binance_pairs, is_trading_allowed_by_btc_gate, MARKET_STATE
-)
-
-# Execution Engines
-from spot_engine import run_spot_scalper_tick
-from futures_engine import run_futures_engine_tick
-from grid_engine import GridEngine
-
-# Quantitative Brains
-from regime_manager import RegimeManager
-from smart_money_concepts import SmartMoneyMapper
-from macro_calendar import MacroCalendar
+from pathlib import Path
+from dotenv import load_dotenv
 
 # =============================================================================
-# APEXTICK: MASTER ORCHESTRATOR & API SERVER
+# APEXTICK: MASTER DATABASE CONFIGURATION (INSTITUTIONAL QUANT SCHEMA)
 # =============================================================================
 
-app = Flask(__name__)
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.ERROR)
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(dotenv_path=BASE_DIR / ".env")
 
-# --- INDEPENDENT EXECUTION THREADS ---
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+IS_POSTGRES = DATABASE_URL.startswith("postgres")
 
-def spot_engine_loop():
-    add_log("INFO", "system", "Spot Engine Thread Started.")
-    while True:
-        try: run_spot_scalper_tick()
-        except Exception as e: add_log("ERROR", "spot_engine", f"Execution Error: {e}")
-        time.sleep(3)
+if not IS_POSTGRES:
+    SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", str(BASE_DIR / "apextick.db"))
 
-def futures_engine_loop():
-    add_log("INFO", "system", "Futures Engine Thread Started.")
-    while True:
-        try: run_futures_engine_tick()
-        except Exception as e: add_log("ERROR", "futures_engine", f"Execution Error: {e}")
-        time.sleep(3)
+def get_connection():
+    """Establishes a connection to the active database (PostgreSQL or SQLite)."""
+    if IS_POSTGRES:
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    else:
+        conn = sqlite3.connect(SQLITE_DB_PATH, timeout=20.0)
+        conn.row_factory = sqlite3.Row
+        # Enable concurrent read/writes to stop "database is locked" errors
+        conn.execute("PRAGMA journal_mode=WAL;")
+        return conn
 
-def dynamic_scanner_loop():
-    interval = MARKET_SCANNER_CONFIG.get("refresh_interval_minutes", 0.5) * 60
-    add_log("INFO", "system", f"Dynamic Scanner Thread Started (Tick: {interval}s).")
-    while True:
-        try: sync_binance_pairs()
-        except Exception as e: add_log("ERROR", "scanner", f"Market Scan Error: {e}")
-        time.sleep(interval)
-
-def start_background_services():
-    """Initializes the Phase 1 & Phase 2 Quantitative Brains, then the Execution Arms."""
-    init_db()
-    backfill_btc_history()
-    sync_binance_pairs() 
-    start_btc_stream_background()
-    
-    # Phase 2: Spin up the Quantitative Brains
-    regime = RegimeManager()
-    threading.Thread(target=regime.start, daemon=True).start()
-    
-    smc = SmartMoneyMapper()
-    threading.Thread(target=smc.start, daemon=True).start()
-    
-    macro = MacroCalendar()
-    threading.Thread(target=macro.monitor_loop, daemon=True).start()
-
-    # Phase 3: Spin up the Execution Arms
-    grid = GridEngine()
-    threading.Thread(target=grid.start, daemon=True).start()
-    
-    threading.Thread(target=dynamic_scanner_loop, daemon=True).start()
-    threading.Thread(target=spot_engine_loop, daemon=True).start()
-    threading.Thread(target=futures_engine_loop, daemon=True).start()
-
-# --- GOD-MODE TOGGLES & UI ENDPOINTS ---
-
-@app.route("/")
-def index():
-    row = execute_query("SELECT value FROM bot_settings WHERE key = 'paper_trading_enabled'", fetch_one=True)
-    is_paper = (row["value"] == "1") if row else True
-    return render_template("dashboard.html", bot_name=BOT_NAME, paper_trading=is_paper)
-
-@app.route("/api/toggle-mode", methods=["POST"])
-def toggle_trade_mode():
-    """Hot-swaps the architecture between PAPER and LIVE instantly."""
-    if request.headers.get("X-Admin-Key") != ADMIN_KEY:
-        return jsonify({"error": "Unauthorized"}), 403
-        
-    new_mode = str(request.json.get("paper_trading_enabled", "1"))
-    now_str = datetime.now(timezone.utc).isoformat()
-    execute_query("UPDATE bot_settings SET value = ?, updated_at = ? WHERE key = 'paper_trading_enabled'", (new_mode, now_str), commit=True)
-    
-    mode_str = "PAPER" if new_mode == "1" else "LIVE"
-    add_log("WARNING", "system_admin", f"Trade Mode Hot-Swapped to {mode_str} by Admin UI.")
-    return jsonify({"status": "success", "mode": mode_str})
-
-@app.route("/api/toggle-btc-gate", methods=["POST"])
-def toggle_btc_gate():
-    """Forces the BTC safety gate open to test altcoins during crashes."""
-    if request.headers.get("X-Admin-Key") != ADMIN_KEY:
-        return jsonify({"error": "Unauthorized"}), 403
-        
-    override = str(request.json.get("override", "0"))
-    now_str = datetime.now(timezone.utc).isoformat()
-    execute_query("UPDATE bot_settings SET value = ?, updated_at = ? WHERE key = 'btc_gate_override'", (override, now_str), commit=True)
-    
-    add_log("WARNING", "system_admin", f"BTC Macro Gate Override set to: {'ON (Danger)' if override == '1' else 'OFF (Safe)'}")
-    return jsonify({"status": "success", "override": override})
-
-@app.route("/api/status", methods=["GET"])
-def api_status():
-    mode_row = execute_query("SELECT value FROM bot_settings WHERE key = 'paper_trading_enabled'", fetch_one=True)
-    is_paper = (mode_row["value"] == "1") if mode_row else True
-    
-    halt_row = execute_query("SELECT value FROM bot_settings WHERE key = 'macro_halt'", fetch_one=True)
-    is_halted = (halt_row["value"] == "1") if halt_row else False
-    
-    btc_regime_row = execute_query("SELECT regime FROM market_regimes WHERE pair = 'BTC/USDT'", fetch_one=True)
-    
-    allowed, gate_reason = is_trading_allowed_by_btc_gate()
-    return jsonify({
-        "status": "HALTED" if is_halted else "RUNNING",
-        "api_ok": True,
-        "btc_gate_allowed": allowed,
-        "btc_gate_reason": gate_reason,
-        "ws_connected": MARKET_STATE.get("ws_connected", False),
-        "execution_mode": "PAPER TRADING" if is_paper else "LIVE TRADING",
-        "macro_regime": btc_regime_row["regime"] if btc_regime_row else "TRENDING"
-    })
-
-# --- DATA FEEDS ---
-
-@app.route("/api/btc-sentiment", methods=["GET"])
-def api_btc_sentiment():
-    return jsonify({
-        "sentiment": MARKET_STATE.get("btc_sentiment", "NEUTRAL"),
-        "trend": MARKET_STATE.get("btc_trend", "NEUTRAL"),
-        "atr": f"{MARKET_STATE.get('btc_atr_1h', 0.0):.2f}",
-        "change_24h": f"{MARKET_STATE.get('btc_24h_change', 0.0):+.2f}%",
-        "buy_pressure": f"{MARKET_STATE.get('buy_pressure_pct', 50.0)}%",
-        "sell_pressure": f"{MARKET_STATE.get('sell_pressure_pct', 50.0)}%"
-    })
-
-@app.route("/api/market/powder-keg", methods=["GET"])
-def api_powder_keg():
-    """Feeds the Open Interest Matrix to the UI."""
-    pairs = execute_query("""
-        SELECT pair, last_price, oi_spot_ratio, change_24h_pct 
-        FROM trading_pairs 
-        WHERE oi_spot_ratio > 3.0 AND futures_supported = 1 
-        ORDER BY oi_spot_ratio DESC LIMIT 5
-    """, fetch_all=True)
-    return jsonify(pairs if pairs else [])
-
-@app.route("/api/market/smc-zones", methods=["GET"])
-def api_smc_zones():
-    """Feeds active Order Blocks to the UI."""
-    zones = execute_query("""
-        SELECT pair, pool_type, direction, top_price, bottom_price, status 
-        FROM liquidity_pools 
-        WHERE status = 'PENDING' 
-        ORDER BY created_at DESC LIMIT 10
-    """, fetch_all=True)
-    return jsonify(zones if zones else [])
-
-@app.route("/api/statistics", methods=["GET"])
-def api_statistics():
-    mode_row = execute_query("SELECT value FROM bot_settings WHERE key = 'paper_trading_enabled'", fetch_one=True)
-    current_mode = "PAPER" if (mode_row["value"] == "1") else "LIVE"
-    
-    spot_trades = execute_query("SELECT * FROM spot_trades WHERE trade_mode = ?", (current_mode,), fetch_all=True) or []
-    closed = [t for t in spot_trades if t["status"] == "CLOSED"]
-    open_t = [t for t in spot_trades if t["status"] == "OPEN"]
-    
-    realized = sum(float(t["profit_usdt"] or 0) for t in spot_trades)
-    win_rate = (len([t for t in closed if float(t["profit_usdt"] or 0) > 0]) / len(closed) * 100.0) if closed else 0.0
-    
-    accts = execute_query("SELECT SUM(spot_balance_usdt) as tot FROM accounts", fetch_one=True)
-    portfolio = float(accts["tot"]) if accts and accts["tot"] else 0.0
-
-    return jsonify({"total_profit": round(realized, 2), "win_rate": f"{win_rate:.2f}%", "open_positions": len(open_t), "portfolio_value": round(portfolio, 2)})
-
-@app.route("/api/futures/statistics", methods=["GET"])
-def api_futures_statistics():
-    mode_row = execute_query("SELECT value FROM bot_settings WHERE key = 'paper_trading_enabled'", fetch_one=True)
-    current_mode = "PAPER" if (mode_row["value"] == "1") else "LIVE"
-    
-    fut_trades = execute_query("SELECT * FROM futures_trades WHERE trade_mode = ?", (current_mode,), fetch_all=True) or []
-    closed = [t for t in fut_trades if t["status"] == "CLOSED"]
-    open_pos = [t for t in fut_trades if t["status"] == "OPEN"]
-    
-    net_pnl = sum(float(t["pnl_usdt"] or 0) for t in fut_trades)
-    tp_closes = [t for t in closed if t.get("close_type") and "TP" in t["close_type"]]
-    win_rate = (len(tp_closes) / len(closed) * 100.0) if closed else 0.0
-    
-    accts = execute_query("SELECT SUM(futures_balance_usdt) as tot FROM accounts", fetch_one=True)
-    portfolio = float(accts["tot"]) if accts and accts["tot"] else 0.0
-
-    return jsonify({"completed_trades": len(closed), "win_rate": f"{win_rate:.2f}%", "net_pnl": round(net_pnl, 2), "portfolio_value": round(portfolio, 2), "open_positions": len(open_pos)})
-
-@app.route("/api/positions", methods=["GET"])
-def api_positions():
-    mode_row = execute_query("SELECT value FROM bot_settings WHERE key = 'paper_trading_enabled'", fetch_one=True)
-    current_mode = "PAPER" if (mode_row["value"] == "1") else "LIVE"
-    
-    spot_open = execute_query("SELECT * FROM spot_trades WHERE status = 'OPEN' AND trade_mode = ?", (current_mode,), fetch_all=True) or []
-    fut_open = execute_query("SELECT * FROM futures_trades WHERE status = 'OPEN' AND trade_mode = ?", (current_mode,), fetch_all=True) or []
-    positions = []
-    
-    for t in spot_open:
-        pair, entry, qty = t["pair"], float(t["entry_price"]), float(t["qty"])
-        live_price = MARKET_STATE["live_prices"].get(pair, entry)
-        pnl = (live_price - entry) * qty
-        roi_pct = ((live_price - entry) / entry) * 100.0 if entry > 0 else 0.0
-        positions.append({
-            "id": t["id"], "type": "spot", "pair": pair, "direction": "SPOT", 
-            "entry": f"${entry:.5f}", "live_price": f"${live_price:.5f}", "size": f"${(qty * live_price):.2f}",
-            "pnl_usdt": pnl, "roi_pct": roi_pct, "tp1": bool(t["tp1_hit"]), "tp2": bool(t["tp2_hit"]), "tp3": bool(t.get("tp3_hit"))
-        })
-
-    for t in fut_open:
-        pair, entry, margin, lev, direction = t["pair"], float(t["entry_price"]), float(t.get("margin_usdt", 0)), int(t["leverage"]), t["direction"]
-        live_price = MARKET_STATE["live_prices"].get(pair, entry)
-        
-        move_pct = ((live_price - entry) / entry) * 100.0 if direction == "LONG" else ((entry - live_price) / entry) * 100.0
-        roi_pct = move_pct * lev
-        pnl = margin * (roi_pct / 100.0)
+def execute_query(query: str, params: tuple = (), fetch_one: bool = False, fetch_all: bool = False, commit: bool = False):
+    """Executes a SQL query safely across both SQLite and PostgreSQL."""
+    conn = get_connection()
+    try:
+        if IS_POSTGRES:
+            query = query.replace("?", "%s")
             
-        positions.append({
-            "id": t["id"], "type": "futures", "pair": pair, "direction": direction, 
-            "entry": f"${entry:.5f}", "live_price": f"${live_price:.5f}", "size": f"${margin:.2f} ({lev}x)",
-            "pnl_usdt": pnl, "roi_pct": roi_pct, "peak_roi": float(t.get("peak_roi_pct") or 0.0),
-            "tp1": bool(t["tp1_hit"]), "tp2": bool(t["tp2_hit"]), "tp3": bool(t.get("tp3_hit"))
-        })
-
-    positions.sort(key=lambda x: x["roi_pct"], reverse=True)
-    for p in positions: p["pnl_formatted"] = f"${p['pnl_usdt']:.2f} ({p['roi_pct']:+.2f}%)"
-    return jsonify(positions)
-
-# --- SECURE MANUAL OVERRIDE (FORCE CLOSE) ---
-@app.route("/api/trades/close/<trade_type>/<int:trade_id>", methods=["POST"])
-def force_close_trade(trade_type, trade_id):
-    if request.headers.get("X-Admin-Key") != ADMIN_KEY:
-        return jsonify({"error": "Unauthorized"}), 403
+        cursor = conn.cursor()
+        cursor.execute(query, params)
         
+        result = None
+        if fetch_one:
+            row = cursor.fetchone()
+            result = dict(row) if row else None
+        elif fetch_all:
+            rows = cursor.fetchall()
+            result = [dict(r) for r in rows]
+            
+        if commit:
+            conn.commit()
+            
+        return result
+    finally:
+        conn.close()
+
+def init_db():
+    """
+    Initializes the database schema. 
+    Upgraded for Smart Money Concepts (SMC), Regime Detection, Live Toggles, 
+    and Concurrent Write-Ahead Logging (WAL).
+    """
+    pk = "SERIAL PRIMARY KEY" if IS_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    
+    # 1. Accounts Table (Single Clean Account Architecture)
+    execute_query(f"""
+        CREATE TABLE IF NOT EXISTS accounts (
+            id {pk},
+            account_id TEXT UNIQUE NOT NULL,
+            display_name TEXT NOT NULL,
+            spot_enabled INTEGER DEFAULT 1,
+            futures_enabled INTEGER DEFAULT 1,
+            spot_balance_usdt REAL DEFAULT 150.0,
+            spot_capital_cap REAL DEFAULT 150.0,
+            futures_balance_usdt REAL DEFAULT 150.0,
+            futures_capital_cap REAL DEFAULT 150.0,
+            futures_live_withdraw REAL DEFAULT 0.0
+        )
+    """, commit=True)
+
+    # 2. Dynamic Trading Pairs (Upgraded with OI Matrix and ATR)
+    execute_query(f"""
+        CREATE TABLE IF NOT EXISTS trading_pairs (
+            id {pk},
+            pair TEXT UNIQUE NOT NULL,
+            status TEXT DEFAULT 'ACTIVE',
+            spot_supported INTEGER DEFAULT 1,
+            futures_supported INTEGER DEFAULT 1,
+            change_24h_pct REAL DEFAULT 0.0,
+            volume_24h_usd REAL DEFAULT 0.0,
+            last_price REAL DEFAULT 0.0,
+            oi_usd REAL DEFAULT 0.0,
+            oi_spot_ratio REAL DEFAULT 0.0,
+            atr REAL DEFAULT 0.0,
+            reason TEXT DEFAULT 'Dynamic Market Scan',
+            updated_at TEXT NOT NULL
+        )
+    """, commit=True)
+
+    # --- DYNAMIC MIGRATION: Safely inject OI and ATR columns if upgrading an old SQLite file ---
+    new_pair_columns = {
+        "oi_usd": "REAL DEFAULT 0.0",
+        "oi_spot_ratio": "REAL DEFAULT 0.0",
+        "atr": "REAL DEFAULT 0.0"
+    }
+    for col, col_type in new_pair_columns.items():
+        try:
+            execute_query(f"ALTER TABLE trading_pairs ADD COLUMN {col} {col_type}", commit=True)
+        except Exception:
+            pass # Column already exists, proceed normally
+
+    # 3. Spot Trades (Upgraded for SMC execution and Paper/Live separation)
+    execute_query(f"""
+        CREATE TABLE IF NOT EXISTS spot_trades (
+            id {pk},
+            account_id TEXT NOT NULL,
+            pair TEXT NOT NULL,
+            trade_mode TEXT DEFAULT 'PAPER', 
+            status TEXT DEFAULT 'OPEN',
+            entry_price REAL NOT NULL,
+            exit_price REAL,
+            qty REAL NOT NULL,
+            remaining_qty REAL NOT NULL,
+            notional_usdt REAL NOT NULL,
+            profit_usdt REAL DEFAULT 0.0,
+            profit_pct REAL DEFAULT 0.0,
+            tp1_hit INTEGER DEFAULT 0,
+            tp2_hit INTEGER DEFAULT 0,
+            tp3_hit INTEGER DEFAULT 0,
+            opened_at TEXT NOT NULL,
+            closed_at TEXT
+        )
+    """, commit=True)
+
+    # 4. Futures Trades (Upgraded for Trailing Peaks and Liquidation Hunting)
+    execute_query(f"""
+        CREATE TABLE IF NOT EXISTS futures_trades (
+            id {pk},
+            account_id TEXT NOT NULL,
+            pair TEXT NOT NULL,
+            trade_mode TEXT DEFAULT 'PAPER',
+            direction TEXT NOT NULL,
+            status TEXT DEFAULT 'OPEN',
+            entry_price REAL NOT NULL,
+            exit_price REAL,
+            margin_usdt REAL NOT NULL,
+            remaining_margin_usdt REAL NOT NULL,
+            notional_usdt REAL NOT NULL,
+            leverage INTEGER NOT NULL,
+            pnl_usdt REAL DEFAULT 0.0,
+            pnl_pct REAL DEFAULT 0.0,
+            close_type TEXT,
+            peak_roi_pct REAL DEFAULT 0.0,
+            worst_roi_pct REAL DEFAULT 0.0,
+            tp1_hit INTEGER DEFAULT 0,
+            tp2_hit INTEGER DEFAULT 0,
+            tp3_hit INTEGER DEFAULT 0,
+            opened_at TEXT NOT NULL,
+            closed_at TEXT
+        )
+    """, commit=True)
+
+    # --- DYNAMIC MIGRATION: Inject Take-Profit tracking columns into existing trade tables ---
+    tp_columns = {
+        "tp1_hit": "INTEGER DEFAULT 0",
+        "tp2_hit": "INTEGER DEFAULT 0",
+        "tp3_hit": "INTEGER DEFAULT 0"
+    }
+    for table in ["spot_trades", "futures_trades"]:
+        for col, col_type in tp_columns.items():
+            try:
+                execute_query(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}", commit=True)
+            except Exception:
+                pass # Column already exists, proceed normally
+
+    # 5. System Logs
+    execute_query(f"""
+        CREATE TABLE IF NOT EXISTS logs (
+            id {pk},
+            timestamp TEXT NOT NULL,
+            level TEXT NOT NULL,
+            source TEXT NOT NULL,
+            message TEXT NOT NULL
+        )
+    """, commit=True)
+
+    # 6. Bot Settings (God-Mode Toggles)
+    execute_query(f"""
+        CREATE TABLE IF NOT EXISTS bot_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """, commit=True)
+
+    # 7. Liquidity Pools (NEW: Smart Money Concepts Mapping)
+    execute_query(f"""
+        CREATE TABLE IF NOT EXISTS liquidity_pools (
+            id {pk},
+            pair TEXT NOT NULL,
+            pool_type TEXT NOT NULL,      -- 'FVG' or 'ORDER_BLOCK'
+            direction TEXT NOT NULL,      -- 'BULLISH' or 'BEARISH'
+            top_price REAL NOT NULL,
+            bottom_price REAL NOT NULL,
+            status TEXT DEFAULT 'PENDING',-- 'PENDING', 'MITIGATED', 'INVALIDATED'
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """, commit=True)
+
+    # 8. Market Regimes (NEW: Trend vs Range State Machine)
+    execute_query(f"""
+        CREATE TABLE IF NOT EXISTS market_regimes (
+            id {pk},
+            pair TEXT UNIQUE NOT NULL,
+            regime TEXT DEFAULT 'TRENDING',    -- 'TRENDING' or 'RANGING'
+            volatility_state TEXT DEFAULT 'LOW', -- 'LOW', 'HIGH', 'EXTREME'
+            updated_at TEXT NOT NULL
+        )
+    """, commit=True)
+
+
+    # --- SEED DEFAULT DATA ---
     now_str = datetime.now(timezone.utc).isoformat()
-    table = "futures_trades" if trade_type == "futures" else "spot_trades"
     
-    trade = execute_query(f"SELECT * FROM {table} WHERE id = ?", (trade_id,), fetch_one=True)
-    if not trade:
-        return jsonify({"error": "Trade not found"}), 404
-        
-    pair = trade["pair"]
-    live_price = MARKET_STATE["live_prices"].get(pair, float(trade["entry_price"]))
-    
-    if trade_type == "futures":
-        entry = float(trade["entry_price"])
-        lev = int(trade["leverage"])
-        margin = float(trade["margin_usdt"])
-        direction = trade["direction"]
-        
-        move_pct = ((live_price - entry) / entry) if direction == "LONG" else ((entry - live_price) / entry)
-        roi_pct = move_pct * lev
-        pnl_usdt = margin * roi_pct
-        
-        execute_query(f"""
-            UPDATE futures_trades 
-            SET status = 'CLOSED', exit_price = ?, pnl_usdt = ?, pnl_pct = ?, close_type = 'MANUAL_FORCE_CLOSE', closed_at = ?
-            WHERE id = ?
-        """, (live_price, pnl_usdt, roi_pct * 100, now_str, trade_id), commit=True)
-        
-    else: # Spot
-        entry = float(trade["entry_price"])
-        qty = float(trade["qty"])
-        profit_usdt = (live_price - entry) * qty
-        profit_pct = ((live_price - entry) / entry) * 100
-        
-        execute_query(f"""
-            UPDATE spot_trades 
-            SET status = 'CLOSED', exit_price = ?, profit_usdt = ?, profit_pct = ?, closed_at = ?
-            WHERE id = ?
-        """, (live_price, profit_usdt, profit_pct, now_str, trade_id), commit=True)
+    # Ensure Account matches $150 Capital requirements
+    existing_acct = execute_query("SELECT id FROM accounts WHERE account_id = 'Emmanuel_Paper_150'", fetch_one=True)
+    if not existing_acct:
+        execute_query("""
+            INSERT INTO accounts (
+                account_id, display_name, spot_enabled, futures_enabled,
+                spot_balance_usdt, spot_capital_cap, 
+                futures_balance_usdt, futures_capital_cap, futures_live_withdraw
+            ) VALUES (?, ?, 1, 1, ?, ?, ?, ?, 0.0)
+        """, ("Emmanuel_Paper_150", "Emmanuel ($150)", 150.0, 150.0, 150.0, 150.0), commit=True)
 
-    add_log("WARNING", "system_admin", f"Manual Force Close triggered for {trade_type.upper()} trade #{trade_id} ({pair})")
-    return jsonify({"status": "success", "message": f"{pair} forcefully closed."})
+    # Pre-Seed the God-Mode Dashboard Toggles
+    default_settings = [
+        ('paper_trading_enabled', '1'),
+        ('btc_gate_override', '0')
+    ]
+    for key, val in default_settings:
+        execute_query(
+            "INSERT OR IGNORE INTO bot_settings (key, value, updated_at) VALUES (?, ?, ?)",
+            (key, val, now_str),
+            commit=True
+        )
 
-# --- NUCLEAR OPTION (LIQUIDATE ALL) ---
-@app.route("/api/trades/liquidate-all", methods=["POST"])
-def liquidate_all():
-    if request.headers.get("X-Admin-Key") != ADMIN_KEY:
-        return jsonify({"error": "Unauthorized"}), 403
-        
+def add_log(level: str, source: str, message: str):
+    """Inserts a system log and prints it to the console."""
     now_str = datetime.now(timezone.utc).isoformat()
-    
-    # 1. Nuke Open Spot Trades
-    open_spot = execute_query("SELECT * FROM spot_trades WHERE status = 'OPEN'", fetch_all=True) or []
-    for trade in open_spot:
-        pair = trade["pair"]
-        live_price = MARKET_STATE["live_prices"].get(pair, float(trade["entry_price"]))
-        entry = float(trade["entry_price"])
-        qty = float(trade["qty"])
-        
-        profit_usdt = (live_price - entry) * qty
-        profit_pct = ((live_price - entry) / entry) * 100
-        
-        execute_query("""
-            UPDATE spot_trades 
-            SET status = 'CLOSED', exit_price = ?, profit_usdt = ?, profit_pct = ?, closed_at = ? 
-            WHERE id = ?
-        """, (live_price, profit_usdt, profit_pct, now_str, trade["id"]), commit=True)
+    try:
+        execute_query(
+            "INSERT INTO logs (timestamp, level, source, message) VALUES (?, ?, ?, ?)",
+            (now_str, level, source, message),
+            commit=True
+        )
+        # Print to console for immediate visibility during PM2/terminal monitoring
+        print(f"[{now_str}] [{level}] {message}")
+    except Exception as e:
+        print(f"Failed to write log to database: {e}")
 
-    # 2. Nuke Open Futures Trades
-    open_futures = execute_query("SELECT * FROM futures_trades WHERE status = 'OPEN'", fetch_all=True) or []
-    for trade in open_futures:
-        pair = trade["pair"]
-        live_price = MARKET_STATE["live_prices"].get(pair, float(trade["entry_price"]))
-        entry = float(trade["entry_price"])
-        lev = int(trade["leverage"])
-        margin = float(trade["margin_usdt"])
-        direction = trade["direction"]
-        
-        move_pct = ((live_price - entry) / entry) if direction == "LONG" else ((entry - live_price) / entry)
-        roi_pct = move_pct * lev
-        pnl_usdt = margin * roi_pct
-        
-        execute_query("""
-            UPDATE futures_trades 
-            SET status = 'CLOSED', exit_price = ?, pnl_usdt = ?, pnl_pct = ?, close_type = 'LIQUIDATE_ALL', closed_at = ? 
-            WHERE id = ?
-        """, (live_price, pnl_usdt, roi_pct * 100, now_str, trade["id"]), commit=True)
-
-    add_log("WARNING", "system_admin", f"NUCLEAR OPTION DEPLOYED: Liquidated {len(open_spot)} Spot and {len(open_futures)} Futures positions.")
-    return jsonify({"status": "success", "message": "All open positions forcefully liquidated."})
-
-@app.route("/api/trades", methods=["GET"])
-def api_trades():
-    mode_row = execute_query("SELECT value FROM bot_settings WHERE key = 'paper_trading_enabled'", fetch_one=True)
-    current_mode = "PAPER" if (mode_row and mode_row["value"] == "1") else "LIVE"
-    
-    exits = execute_query("""
-        SELECT pair, 'FUTURES' as type, exit_price, pnl_usdt as realized_pnl, closed_at
-        FROM futures_trades 
-        WHERE status = 'CLOSED' AND trade_mode = ?
-        UNION ALL
-        SELECT pair, 'SPOT' as type, exit_price, profit_usdt as realized_pnl, closed_at
-        FROM spot_trades 
-        WHERE status = 'CLOSED' AND trade_mode = ?
-        ORDER BY closed_at DESC LIMIT 15
-    """, (current_mode, current_mode), fetch_all=True)
-    
-    return jsonify(exits if exits else [])
-
-@app.route("/api/futures/trades", methods=["GET"])
-def api_futures_trades():
-    return jsonify([]) # Boilerplate
-
-@app.route("/api/logs", methods=["GET"])
-def api_logs():
-    logs = execute_query("SELECT timestamp, level, source, message FROM logs ORDER BY id DESC LIMIT 500", fetch_all=True)
-    return jsonify(logs if logs else [])
-
-if __name__ == '__main__':
-    os.makedirs("templates", exist_ok=True)
-    os.makedirs("static", exist_ok=True)
-    print("Booting ApexTick Institutional Orchestrator...")
-    start_background_services()
-    app.run(host='0.0.0.0', port=5000, threaded=True, use_reloader=False)
+if __name__ == "__main__":
+    init_db()
+    print("ApexTick Database Initialized with WAL Concurrency, SMC, and Dynamic Migrations.")
