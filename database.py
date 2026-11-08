@@ -107,6 +107,19 @@ def init_db():
         except Exception:
             pass # Column already exists, proceed normally
 
+    # --- DYNAMIC MIGRATION: Inject Take-Profit tracking columns into existing trade tables ---
+    tp_columns = {
+        "tp1_hit": "INTEGER DEFAULT 0",
+        "tp2_hit": "INTEGER DEFAULT 0",
+        "tp3_hit": "INTEGER DEFAULT 0"
+    }
+    for table in ["spot_trades", "futures_trades"]:
+        for col, col_type in tp_columns.items():
+            try:
+                execute_query(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}", commit=True)
+            except Exception:
+                pass # Column already exists, proceed normally
+    
     # 3. Spot Trades (Upgraded for SMC execution and Paper/Live separation)
     execute_query(f"""
         CREATE TABLE IF NOT EXISTS spot_trades (
