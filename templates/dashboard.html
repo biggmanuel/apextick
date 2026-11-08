@@ -433,8 +433,11 @@
                 method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Key": adminKey }
             });
             const data = await res.json();
-            if (data.status.includes("success")) fetchData();
-            else alert("Error: " + (data.error || "Failed to close"));
+            if (data.status && data.status.includes("success")) {
+                fetchData();
+            } else {
+                alert("Error: " + (data.error || "Failed to close"));
+            }
         } catch (e) { alert("Network error."); }
     }
 
@@ -446,15 +449,21 @@
         const adminKey = prompt(`DANGER: You are about to instantly market-sell ${currentOpenPositions.length} positions. Enter Admin Key to confirm:`);
         if (!adminKey) return;
 
-        for (const p of currentOpenPositions) {
-            try {
-                await fetch(`/api/trades/close/${p.type}/${p.id}`, {
-                    method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Key": adminKey }
-                });
-            } catch(e) { console.error("Panic sell failed for ID", p.id); }
+        try {
+            const res = await fetch(`/api/trades/liquidate-all`, {
+                method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Key": adminKey }
+            });
+            const data = await res.json();
+            if (data.status && data.status.includes("success")) {
+                alert("Panic Execution Complete.");
+                fetchData();
+            } else {
+                alert("Error: " + (data.error || "Failed to liquidate"));
+            }
+        } catch(e) { 
+            console.error("Panic sell failed", e); 
+            alert("Network error during liquidation.");
         }
-        alert("Panic Execution Complete.");
-        fetchData();
     }
 
 
@@ -578,23 +587,29 @@
                 });
             }
 
-            // 7. Trade History
-            const resHist = await fetch('/api/futures/trades?limit=8');
+            // 7. Trade History (CORRECTED BLOCK)
+            const resHist = await fetch('/api/trades');
             const history = await resHist.json();
             const tbodyHist = document.getElementById('history-tbody');
             tbodyHist.innerHTML = "";
 
-            history.forEach(h => {
-                const isProfit = h.pnl.includes('+');
-                tbodyHist.innerHTML += `
-                    <tr>
-                        <td style="font-weight: 700;">${h.pair}</td>
-                        <td><span class="tag ${h.direction === 'LONG' ? 'long' : 'short'}">${h.type}</span></td>
-                        <td class="font-mono">${h.exit}</td>
-                        <td class="${isProfit ? 'text-profit' : 'text-loss'} font-mono">${h.pnl}</td>
-                    </tr>
-                `;
-            });
+            if (history.length === 0) {
+                tbodyHist.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--text-muted);">No closed trades yet.</td></tr>`;
+            } else {
+                history.forEach(h => {
+                    const pnl = parseFloat(h.realized_pnl);
+                    const isProfit = pnl >= 0;
+                    
+                    tbodyHist.innerHTML += `
+                        <tr>
+                            <td style="font-weight: 700;">${h.pair}</td>
+                            <td><span class="tag ${h.type === 'SPOT' ? 'spot' : 'short'}">${h.type}</span></td>
+                            <td class="font-mono">$${h.exit_price.toFixed(4)}</td>
+                            <td class="${isProfit ? 'text-profit' : 'text-loss'} font-mono">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
+                        </tr>
+                    `;
+                });
+            }
 
             // 8. Logs
             const resLogs = await fetch('/api/logs?limit=50');
