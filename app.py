@@ -256,7 +256,21 @@ def force_close_trade(trade_type, trade_id):
 
 @app.route("/api/trades", methods=["GET"])
 def api_trades():
-    return jsonify([]) # Boilerplate
+    mode_row = execute_query("SELECT value FROM bot_settings WHERE key = 'paper_trading_enabled'", fetch_one=True)
+    current_mode = "PAPER" if (mode_row and mode_row["value"] == "1") else "LIVE"
+    
+    exits = execute_query("""
+        SELECT pair, 'FUTURES' as type, exit_price, pnl_usdt as realized_pnl, closed_at
+        FROM futures_trades 
+        WHERE status = 'CLOSED' AND trade_mode = ?
+        UNION ALL
+        SELECT pair, 'SPOT' as type, exit_price, profit_usdt as realized_pnl, closed_at
+        FROM spot_trades 
+        WHERE status = 'CLOSED' AND trade_mode = ?
+        ORDER BY closed_at DESC LIMIT 15
+    """, (current_mode, current_mode), fetch_all=True)
+    
+    return jsonify(exits if exits else [])
 
 @app.route("/api/futures/trades", methods=["GET"])
 def api_futures_trades():
