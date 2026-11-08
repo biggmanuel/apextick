@@ -251,8 +251,95 @@ def api_positions():
 def force_close_trade(trade_type, trade_id):
     if request.headers.get("X-Admin-Key") != ADMIN_KEY:
         return jsonify({"error": "Unauthorized"}), 403
-    # Same logic as previous file (removed for brevity of the snippet). Assumes DB state update.
-    return jsonify({"status": "success (Force Closed)"})
+        
+    now_str = datetime.now(timezone.utc).isoformat()
+    table = "futures_trades" if trade_type == "futures" else "spot_trades"
+    
+    trade = execute_query(f"SELECT * FROM {table} WHERE id = ?", (trade_id,), fetch_one=True)
+    if not trade:
+        return jsonify({"error": "Trade not found"}), 404
+        
+    pair = trade["pair"]
+    live_price = MARKET_STATE["live_prices"].get(pair, float(trade["entry_price"]))
+    
+    if trade_type == "futures":
+        entry = float(trade["entry_price"])
+        lev = int(trade["leverage"])
+        margin = float(trade["margin_usdt"])
+        direction = trade["direction"]
+        
+        move_pct = ((live_price - entry) / entry) if direction == "LONG" else ((entry - live_price) / entry)
+        roi_pct = move_pct * lev
+        pnl_usdt = margin * roi_pct
+        
+        execute_query(f"""
+            UPDATE futures_trades 
+            SET status = 'CLOSED', exit_price = ?, pnl_usdt = ?, pnl_pct = ?, close_type = 'MANUAL_FORCE_CLOSE', closed_at = ?
+            WHERE id = ?
+        """, (live_price, pnl_usdt, roi_pct * 100, now_str, trade_id), commit=True)
+        
+    else: # Spot
+        entry = float(trade["entry_price"])
+        qty = float(trade["qty"])
+        profit_usdt = (live_price - entry) * qty
+        profit_pct = ((live_price - entry) / entry) * 100
+        
+        execute_query(f"""
+            UPDATE spot_trades 
+            SET status = 'CLOSED', exit_price = ?, profit_usdt = ?, profit_pct = ?, closed_at = ?
+            WHERE id = ?
+        """, (live_price, profit_usdt, profit_pct, now_str, trade_id), commit=True)
+
+    add_log("WARNING", "system_admin", f"Manual Force Close triggered for {trade_type.upper()} trade #{trade_id} ({pair})")
+    return jsonify({"status": "success", "message": f"{pair} forcefully closed."})
+
+# --- NUCLEAR OPTION (LIQUIDATE ALL) ---
+@app.route("/api/trades/liquidate-all", methods=["POST"])
+def liquidate_all():
+    if request.headers.get("X-Admin-Key") != ADMIN_KEY:
+        return jsonify({"error": "Unauthorized"}), 403
+        
+    now_str = datetime.now(timezone.utc).isoformat()
+    
+    # 1. Nuke Open Spot Trades
+    open_spot = execute_query("SELECT * FROM spot_trades WHERE status = 'OPEN'", fetch_all=True) or []
+    for trade in open_spot:
+        pair = trade["pair"]
+        live_price = MARKET_STATE["live_prices"].get(pair, float(trade["entry_price"]))
+        entry = float(trade["entry_price"])
+        qty = float(trade["qty"])
+        
+        profit_usdt = (live_price - entry) * qty
+        profit_pct = ((live_price - entry) / entry) * 100
+        
+        execute_query("""
+            UPDATE spot_trades 
+            SET status = 'CLOSED', exit_price = ?, profit_usdt = ?, profit_pct = ?, closed_at = ? 
+            WHERE id = ?
+        """, (live_price, profit_usdt, profit_pct, now_str, trade["id"]), commit=True)
+
+    # 2. Nuke Open Futures Trades
+    open_futures = execute_query("SELECT * FROM futures_trades WHERE status = 'OPEN'", fetch_all=True) or []
+    for trade in open_futures:
+        pair = trade["pair"]
+        live_price = MARKET_STATE["live_prices"].get(pair, float(trade["entry_price"]))
+        entry = float(trade["entry_price"])
+        lev = int(trade["leverage"])
+        margin = float(trade["margin_usdt"])
+        direction = trade["direction"]
+        
+        move_pct = ((live_price - entry) / entry) if direction == "LONG" else ((entry - live_price) / entry)
+        roi_pct = move_pct * lev
+        pnl_usdt = margin * roi_pct
+        
+        execute_query("""
+            UPDATE futures_trades 
+            SET status = 'CLOSED', exit_price = ?, pnl_usdt = ?, pnl_pct = ?, close_type = 'LIQUIDATE_ALL', closed_at = ? 
+            WHERE id = ?
+        """, (live_price, pnl_usdt, roi_pct * 100, now_str, trade["id"]), commit=True)
+
+    add_log("WARNING", "system_admin", f"NUCLEAR OPTION DEPLOYED: Liquidated {len(open_spot)} Spot and {len(open_futures)} Futures positions.")
+    return jsonify({"status": "success", "message": "All open positions forcefully liquidated."})
 
 @app.route("/api/trades", methods=["GET"])
 def api_trades():
