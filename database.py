@@ -26,6 +26,8 @@ def get_connection():
     else:
         conn = sqlite3.connect(SQLITE_DB_PATH, timeout=20.0)
         conn.row_factory = sqlite3.Row
+        # Enable concurrent read/writes to stop "database is locked" errors
+        conn.execute("PRAGMA journal_mode=WAL;")
         return conn
 
 def execute_query(query: str, params: tuple = (), fetch_one: bool = False, fetch_all: bool = False, commit: bool = False):
@@ -56,7 +58,8 @@ def execute_query(query: str, params: tuple = (), fetch_one: bool = False, fetch
 def init_db():
     """
     Initializes the database schema. 
-    Upgraded for Smart Money Concepts (SMC), Regime Detection, and Live Toggles.
+    Upgraded for Smart Money Concepts (SMC), Regime Detection, Live Toggles, 
+    and Concurrent Write-Ahead Logging (WAL).
     """
     pk = "SERIAL PRIMARY KEY" if IS_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
     
@@ -107,19 +110,6 @@ def init_db():
         except Exception:
             pass # Column already exists, proceed normally
 
-    # --- DYNAMIC MIGRATION: Inject Take-Profit tracking columns into existing trade tables ---
-    tp_columns = {
-        "tp1_hit": "INTEGER DEFAULT 0",
-        "tp2_hit": "INTEGER DEFAULT 0",
-        "tp3_hit": "INTEGER DEFAULT 0"
-    }
-    for table in ["spot_trades", "futures_trades"]:
-        for col, col_type in tp_columns.items():
-            try:
-                execute_query(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}", commit=True)
-            except Exception:
-                pass # Column already exists, proceed normally
-    
     # 3. Spot Trades (Upgraded for SMC execution and Paper/Live separation)
     execute_query(f"""
         CREATE TABLE IF NOT EXISTS spot_trades (
@@ -170,6 +160,19 @@ def init_db():
             closed_at TEXT
         )
     """, commit=True)
+
+    # --- DYNAMIC MIGRATION: Inject Take-Profit tracking columns into existing trade tables ---
+    tp_columns = {
+        "tp1_hit": "INTEGER DEFAULT 0",
+        "tp2_hit": "INTEGER DEFAULT 0",
+        "tp3_hit": "INTEGER DEFAULT 0"
+    }
+    for table in ["spot_trades", "futures_trades"]:
+        for col, col_type in tp_columns.items():
+            try:
+                execute_query(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}", commit=True)
+            except Exception:
+                pass # Column already exists, proceed normally
 
     # 5. System Logs
     execute_query(f"""
@@ -260,4 +263,4 @@ def add_log(level: str, source: str, message: str):
 
 if __name__ == "__main__":
     init_db()
-    print("ApexTick Database Initialized with Smart Money Concepts, Regime Tracking, and God-Mode UI Memory.")
+    print("ApexTick Database Initialized with WAL Concurrency, SMC, and Dynamic Migrations.")
