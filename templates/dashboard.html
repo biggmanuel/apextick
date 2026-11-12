@@ -640,7 +640,6 @@
                 });
             }
 
-<<<<<<< HEAD
             // 7. Split Trade History (Spot & Futures)
             const resHist = await fetch('/api/trades');
             const historyObj = await resHist.json();
@@ -688,27 +687,6 @@
                             <td class="font-mono">$${formatPrice(h.exit_price)}</td>
                             <td class="${isProfit ? 'text-profit' : 'text-loss'} font-mono">${isProfit ? '+' : ''}$${pnl.toFixed(2)}</td>
                             <td class="${isProfit ? 'text-profit' : 'text-loss'} font-mono" style="font-size:0.8rem;">${isProfit ? '+' : ''}${pnlPct.toFixed(2)}%</td>
-=======
-            // 7. Trade History (CORRECTED BLOCK)
-            const resHist = await fetch('/api/trades');
-            const history = await resHist.json();
-            const tbodyHist = document.getElementById('history-tbody');
-            tbodyHist.innerHTML = "";
-
-            if (history.length === 0) {
-                tbodyHist.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--text-muted);">No closed trades yet.</td></tr>`;
-            } else {
-                history.forEach(h => {
-                    const pnl = parseFloat(h.realized_pnl);
-                    const isProfit = pnl >= 0;
-                    
-                    tbodyHist.innerHTML += `
-                        <tr>
-                            <td style="font-weight: 700;">${h.pair}</td>
-                            <td><span class="tag ${h.type === 'SPOT' ? 'spot' : 'short'}">${h.type}</span></td>
-                            <td class="font-mono">$${h.exit_price.toFixed(4)}</td>
-                            <td class="${isProfit ? 'text-profit' : 'text-loss'} font-mono">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
->>>>>>> 44907382aa7741fec8c952ad43b7f6a9c0af75a3
                         </tr>
                     `;
                 });
