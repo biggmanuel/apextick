@@ -5,6 +5,7 @@ import ccxt
 
 # ==============================================================================
 # APEXTICK: INSTITUTIONAL SCALPING & QUANTITATIVE ENGINE
+# (Upgraded for 75/25 SMC Sniper Architecture)
 # ==============================================================================
 
 # --- ENVIRONMENT SETUP ---
@@ -41,22 +42,23 @@ exchange = ccxt.binance({
 
 # --- SPOT TRADING ENGINE CONFIGURATION (The Accumulator) ---
 SPOT_CONFIG = {
-    "capital_cap_usdt": 150.0,       # Updated to exactly $150 base balance
+    "capital_cap_usdt": 150.0,       # Base capital limit
     "trade_size_pct": 12.0,          # 12% of $150 = $18.00 per entry
-    "min_trade_usdt": 17.0,          # Guarantees scale-outs remain valid on Binance
+    "min_trade_usdt": 17.0,          # Guarantees fractional scale-outs remain valid on Binance
     "max_open_positions": 5,
     "fee_pct": 0.1,                  
-    "tp1_pct": 2.0,                  
-    "tp2_pct": 4.0,                  
-    "tp3_pct": 6.0,                  
-    "tp1_close_ratio": 0.30,
-    "tp2_close_ratio": 0.40,
+    
+    # NEW: 75/25 Dynamic SMC Sniper Execution
+    "tp1_close_ratio": 0.75,         # Secure 75% of the bag at TP1
+    "runner_close_ratio": 1.0,       # Market close the remaining 25% on trailing stop
+    "risk_reward_multiplier": 3.0,   # Dynamic Target: TP1 is placed 3x the distance of the Structural SL
+    "trailing_buffer_pct": 3.0,      # The 25% runner trails the absolute peak watermark by 3%
     "never_close_below_tp": True,    # Forces reliance on exact Demand Zone entries
 }
 
 # --- USDT-M FUTURES TRADING ENGINE CONFIGURATION (The Sniper) ---
 FUTURES_CONFIG = {
-    "capital_cap_usdt": 150.0,       # Updated to exactly $150 base balance
+    "capital_cap_usdt": 150.0,       # Base capital limit
     "leverage": 15,
     "margin_size_pct": 2.0,          # 2% of $150 = $3.00 margin per position base (modified by ATR)
     "min_margin_usdt": 0.4,          
@@ -64,22 +66,11 @@ FUTURES_CONFIG = {
     "fee_pct": 0.05,                 
     "withdraw_split_pct": 0.70,      
     
-    # Tiered Scale-Outs
-    "tp1_roi": 20.0,                 
-    "tp2_roi": 50.0,                 
-    "tp1_close_ratio": 0.30,
-    "tp2_close_ratio": 0.40,
-
-    # Outlier Runner Engine
-    "outlier_arm_roi": 80.0,         
-    "outlier_trail_buffer_pct": 25.0, 
-    "hard_tp3_cap_roi": 400.0,       
-    
-    # Strict Micro-Risk Limits
-    "candle_sl_roi_pct": -5.0,       
-    "hard_sl_roi_pct": -15.0,        
-    "recovery_arm_roi_pct": -8.0,    
-    "recovery_tp_roi_pct": 0.50,     
+    # NEW: 75/25 Dynamic SMC Sniper Execution
+    "tp1_close_ratio": 0.75,         # Secure 75% of margin at TP1. Triggers Breakeven Switch.
+    "runner_close_ratio": 1.0,       # Market close the remaining 25% on trailing stop
+    "risk_reward_multiplier": 3.0,   # Dynamic Target: TP1 is placed 3x the distance of the Structural SL
+    "trailing_buffer_pct": 3.0,      # The 25% runner trails the absolute peak watermark by 3%
 }
 
 # --- DYNAMIC RISK MANAGEMENT (ATR SIZING) ---
