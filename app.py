@@ -224,7 +224,10 @@ def api_positions():
         positions.append({
             "id": t["id"], "type": "spot", "pair": pair, "direction": "SPOT", 
             "entry": f"${entry:.5f}", "live_price": f"${live_price:.5f}", "size": f"${(qty * live_price):.2f}",
-            "pnl_usdt": pnl, "roi_pct": roi_pct, "tp1": bool(t["tp1_hit"]), "tp2": bool(t["tp2_hit"]), "tp3": bool(t.get("tp3_hit"))
+            "pnl_usdt": pnl, "roi_pct": roi_pct, "tp1": bool(t["tp1_hit"]), 
+            "current_sl": float(t.get("current_sl") or 0.0), 
+            "dynamic_tp1": float(t.get("dynamic_tp1") or 0.0),
+            "watermark": float(t.get("watermark_price") or entry)
         })
 
     for t in fut_open:
@@ -239,7 +242,10 @@ def api_positions():
             "id": t["id"], "type": "futures", "pair": pair, "direction": direction, 
             "entry": f"${entry:.5f}", "live_price": f"${live_price:.5f}", "size": f"${margin:.2f} ({lev}x)",
             "pnl_usdt": pnl, "roi_pct": roi_pct, "peak_roi": float(t.get("peak_roi_pct") or 0.0),
-            "tp1": bool(t["tp1_hit"]), "tp2": bool(t["tp2_hit"]), "tp3": bool(t.get("tp3_hit"))
+            "tp1": bool(t["tp1_hit"]), 
+            "current_sl": float(t.get("current_sl") or 0.0), 
+            "dynamic_tp1": float(t.get("dynamic_tp1") or 0.0),
+            "watermark": float(t.get("watermark_price") or entry)
         })
 
     positions.sort(key=lambda x: x["roi_pct"], reverse=True)
@@ -346,22 +352,25 @@ def api_trades():
     mode_row = execute_query("SELECT value FROM bot_settings WHERE key = 'paper_trading_enabled'", fetch_one=True)
     current_mode = "PAPER" if (mode_row and mode_row["value"] == "1") else "LIVE"
     
-    exits = execute_query("""
-        SELECT pair, 'FUTURES' as type, exit_price, pnl_usdt as realized_pnl, closed_at
+    # Split the historical routes directly as requested
+    fut_exits = execute_query("""
+        SELECT pair, 'FUTURES' as type, exit_price, pnl_usdt as realized_pnl, close_type, pnl_pct, closed_at
         FROM futures_trades 
         WHERE status = 'CLOSED' AND trade_mode = ?
-        UNION ALL
-        SELECT pair, 'SPOT' as type, exit_price, profit_usdt as realized_pnl, closed_at
+        ORDER BY closed_at DESC LIMIT 50
+    """, (current_mode,), fetch_all=True)
+    
+    spot_exits = execute_query("""
+        SELECT pair, 'SPOT' as type, exit_price, profit_usdt as realized_pnl, profit_pct, closed_at
         FROM spot_trades 
         WHERE status = 'CLOSED' AND trade_mode = ?
-        ORDER BY closed_at DESC LIMIT 15
-    """, (current_mode, current_mode), fetch_all=True)
+        ORDER BY closed_at DESC LIMIT 70
+    """, (current_mode,), fetch_all=True)
     
-    return jsonify(exits if exits else [])
-
-@app.route("/api/futures/trades", methods=["GET"])
-def api_futures_trades():
-    return jsonify([]) # Boilerplate
+    return jsonify({
+        "futures_trades": fut_exits if fut_exits else [],
+        "spot_trades": spot_exits if spot_exits else []
+    })
 
 @app.route("/api/logs", methods=["GET"])
 def api_logs():
