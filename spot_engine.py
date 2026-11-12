@@ -49,7 +49,6 @@ def is_account_on_spot_cooldown(account_id: str, mode: str) -> tuple[bool, int]:
     return False, 0
 
 def get_dynamic_spot_margin(available_margin: float, atr: float, current_price: float) -> float:
-    """Adjusts Spot capital allocation based on extreme volatility."""
     if not DYNAMIC_RISK_CONFIG["enabled"] or atr <= 0 or current_price <= 0:
         return max(available_margin * (SPOT_CONFIG["trade_size_pct"] / 100.0), SPOT_CONFIG["min_trade_usdt"])
         
@@ -62,13 +61,13 @@ def get_dynamic_spot_margin(available_margin: float, atr: float, current_price: 
     trade_usdt = available_margin * (adjusted_pct / 100.0)
     return max(SPOT_CONFIG["min_trade_usdt"], min(trade_usdt, available_margin))
 
-def check_smc_accumulation_zone(pair: str, current_price: float) -> tuple[bool, str]:
+def check_smc_accumulation_zone(pair: str, current_price: float) -> tuple[bool, str, float]:
     """
-    LAYER 3 SMC FILTER: Replaces VWAP logic.
-    Queries the database to see if the live price is currently mitigating a Bullish Order Block.
+    LAYER 3 SMC FILTER: 
+    Queries the database to see if the live price is mitigating a Bullish Order Block.
+    Returns: (is_valid, reason, ob_edge_price)
     """
     try:
-        # We check for PENDING or recently MITIGATED Bullish zones (Support blocks)
         pools = execute_query(
             """
             SELECT pool_type, top_price, bottom_price 
@@ -79,28 +78,28 @@ def check_smc_accumulation_zone(pair: str, current_price: float) -> tuple[bool, 
         )
         
         if not pools:
-            return False, "No active Smart Money Support Blocks found."
+            return False, "No active Smart Money Support Blocks found.", 0.0
 
         for pool in pools:
             top = pool["top_price"]
-            bottom = pool["bottom_price"]
+            bottom = pool["bottom_price"] 
             
-            # Add a tiny buffer (e.g. 0.2%) to catch front-running at the Order Block edge
             buffer = current_price * 0.002 
             
             if (bottom - buffer) <= current_price <= (top + buffer):
-                return True, f"Price mitigated {pool['pool_type']} Demand Zone (${bottom:.4f} - ${top:.4f})"
+                return True, f"Price mitigated {pool['pool_type']} Demand Zone (${bottom:.4f} - ${top:.4f})", bottom
                 
-        return False, f"Price (${current_price:.4f}) is outside active SMC zones."
+        return False, f"Price (${current_price:.4f}) is outside active SMC zones.", 0.0
     except Exception as e:
-        return False, f"SMC Database error: {e}"
+        return False, f"SMC Database error: {e}", 0.0
+
 
 # =============================================================================
 # MAIN EXECUTION ENGINE
 # =============================================================================
 
 def run_spot_scalper_tick() -> str:
-    """Master loop targeting SMC Accumulation and Tiered Scaling."""
+    """Master loop targeting SMC Accumulation and 100% Target Execution."""
     
     # 1. READ GOD-MODE STATE
     mode_row = execute_query("SELECT value FROM bot_settings WHERE key = 'paper_trading_enabled'", fetch_one=True)
@@ -117,7 +116,7 @@ def run_spot_scalper_tick() -> str:
     now_str = datetime.now(timezone.utc).isoformat()
 
     # -------------------------------------------------------------------------
-    # PHASE 1: MANAGE OPEN POSITIONS (TIERS & PANIC SELL)
+    # PHASE 1: MANAGE OPEN POSITIONS (ACCUMULATOR LOGIC, 100% TP CLOSE)
     # -------------------------------------------------------------------------
     for acct in accounts:
         acct_id = acct["account_id"]
@@ -143,7 +142,15 @@ def run_spot_scalper_tick() -> str:
             orig_qty = float(trade["qty"])
             rem_qty = float(trade.get("remaining_qty") or orig_qty)
             accumulated_profit = float(trade.get("profit_usdt") or 0.0)
-            tp1, tp2 = int(trade.get("tp1_hit") or 0), int(trade.get("tp2_hit") or 0)
+            
+            tp1_hit = int(trade.get("tp1_hit") or 0)
+            dynamic_tp1 = float(trade.get("dynamic_tp1") or 0.0)
+            watermark_price = float(trade.get("watermark_price") or entry_price)
+
+            # --- UPDATE WATERMARK (TRAILING PEAK) ---
+            if current_price > watermark_price:
+                execute_query("UPDATE spot_trades SET watermark_price = ? WHERE id = ?", (current_price, trade_id), commit=True)
+                watermark_price = current_price
 
             # --- MACRO KILL-SWITCH (PANIC SELL) ---
             if is_halted:
@@ -175,77 +182,47 @@ def run_spot_scalper_tick() -> str:
                 activity_summary.append(f"[{acct['display_name']}] 🚨 SHIELD ACTIVATED: Spot {pair} flattened at ${current_price:,.4f}")
                 continue
 
-            # --- TP3 (+6%): FULL CLOSE ---
-            if profit_pct >= SPOT_CONFIG["tp3_pct"]:
+            close_reason = ""
+            sell_qty = 0.0
+            full_close = False
+
+            # SPOT ENGINE HAS NO STOP LOSS. IT ACCUMULATES AND WAITS FOR PROFIT.
+            
+            # --- RULE 1: THE 100% SECURE (TP HIT) ---
+            if current_price >= dynamic_tp1 and not tp1_hit:
+                close_reason = "TP SECURED (100% Bag Locked)"
+                sell_qty = rem_qty
+                full_close = True
+
+            # --- EXECUTE APPLICABLE EXIT PROTOCOL ---
+            if close_reason:
                 if not is_paper:
                     try:
                         symbol = pair.replace("/", "")
                         live_exchange.load_markets()
-                        qty_to_sell = float(live_exchange.amount_to_precision(symbol, rem_qty))
+                        qty_to_sell = float(live_exchange.amount_to_precision(symbol, sell_qty))
                         live_exchange.create_order(symbol, "market", "sell", qty_to_sell)
                     except Exception: continue
-                        
-                sell_notional = rem_qty * current_price
-                fee_usdt = sell_notional * (SPOT_CONFIG["fee_pct"] / 100.0)
-                net_profit = (sell_notional - (rem_qty * entry_price)) - fee_usdt
-
-                execute_query(
-                    "UPDATE spot_trades SET status = 'CLOSED', exit_price = ?, remaining_qty = 0, profit_usdt = ?, profit_pct = ?, tp3_hit = 1, closed_at = ? WHERE id = ?",
-                    (current_price, accumulated_profit + net_profit, profit_pct, now_str, trade_id), commit=True
-                )
                 
-                balance += (sell_notional - fee_usdt)
-                execute_query("UPDATE accounts SET spot_balance_usdt = ? WHERE account_id = ?", (balance, acct_id), commit=True)
-                activity_summary.append(f"[{CURRENT_MODE}] SPOT TP3 HIT 💰: Fully closed {pair} | Final Profit: +${accumulated_profit + net_profit:.2f}")
-                continue
-
-            # --- TP2 (+4%): 40% SCALE OUT ---
-            elif profit_pct >= SPOT_CONFIG["tp2_pct"] and not tp2:
-                sell_qty = min(orig_qty * SPOT_CONFIG["tp2_close_ratio"], rem_qty)
-                if not is_paper:
-                    try:
-                        symbol = pair.replace("/", "")
-                        live_exchange.load_markets()
-                        live_exchange.create_order(symbol, "market", "sell", float(live_exchange.amount_to_precision(symbol, sell_qty)))
-                    except Exception: continue
-                        
                 sell_notional = sell_qty * current_price
                 fee_usdt = sell_notional * (SPOT_CONFIG["fee_pct"] / 100.0)
                 net_profit = (sell_notional - (sell_qty * entry_price)) - fee_usdt
 
-                execute_query(
-                    "UPDATE spot_trades SET remaining_qty = ?, profit_usdt = ?, profit_pct = ?, tp2_hit = 1 WHERE id = ?",
-                    (rem_qty - sell_qty, accumulated_profit + net_profit, profit_pct, trade_id), commit=True
-                )
+                # It will always be a full close now
+                if full_close:
+                    execute_query(
+                        """
+                        UPDATE spot_trades 
+                        SET status = 'CLOSED', exit_price = ?, remaining_qty = 0, profit_usdt = ?, profit_pct = ?, closed_at = ? 
+                        WHERE id = ?
+                        """, (current_price, accumulated_profit + net_profit, profit_pct, now_str, trade_id), commit=True
+                    )
+                    log_msg = f"[{CURRENT_MODE}] {close_reason}: Closed {pair} | Final PnL: +${accumulated_profit + net_profit:.2f}"
+                    add_log("SUCCESS", "apextick_bot", log_msg)
+                    activity_summary.append(log_msg)
                 
                 balance += (sell_notional - fee_usdt)
                 execute_query("UPDATE accounts SET spot_balance_usdt = ? WHERE account_id = ?", (balance, acct_id), commit=True)
-                activity_summary.append(f"[{CURRENT_MODE}] SPOT TP2 HIT: Scaled 40% out of {pair} | Locked: +${net_profit:.2f}")
-                continue
-
-            # --- TP1 (+2%): 30% SCALE OUT ---
-            elif profit_pct >= SPOT_CONFIG["tp1_pct"] and not tp1:
-                sell_qty = min(orig_qty * SPOT_CONFIG["tp1_close_ratio"], rem_qty)
-                if not is_paper:
-                    try:
-                        symbol = pair.replace("/", "")
-                        live_exchange.load_markets()
-                        live_exchange.create_order(symbol, "market", "sell", float(live_exchange.amount_to_precision(symbol, sell_qty)))
-                    except Exception: continue
-                        
-                sell_notional = sell_qty * current_price
-                fee_usdt = sell_notional * (SPOT_CONFIG["fee_pct"] / 100.0)
-                net_profit = (sell_notional - (sell_qty * entry_price)) - fee_usdt
-
-                execute_query(
-                    "UPDATE spot_trades SET remaining_qty = ?, profit_usdt = ?, profit_pct = ?, tp1_hit = 1 WHERE id = ?",
-                    (rem_qty - sell_qty, accumulated_profit + net_profit, profit_pct, trade_id), commit=True
-                )
-                
-                balance += (sell_notional - fee_usdt)
-                execute_query("UPDATE accounts SET spot_balance_usdt = ? WHERE account_id = ?", (balance, acct_id), commit=True)
-                activity_summary.append(f"[{CURRENT_MODE}] SPOT TP1 HIT: Scaled 30% out of {pair} | Locked: +${net_profit:.2f}")
-                continue
 
 
     # -------------------------------------------------------------------------
@@ -301,14 +278,21 @@ def run_spot_scalper_tick() -> str:
             pair = p_info["pair"]
             if pair in ["BTC/USDT", "ETH/USDT", "BNB/USDT"] or pair in held_pairs: continue
 
-            chg_24h = float(p_info.get("change_24h_pct") or 0.0)
             atr = float(p_info.get("atr", 0.0))
             current_price = get_live_price_safely(pair)
 
             # --- LAYER 3: SMC ORDER BLOCK TRIGGER ---
-            passed_smc, smc_reason = check_smc_accumulation_zone(pair, current_price)
-            if not passed_smc:
+            passed_smc, smc_reason, ob_edge_price = check_smc_accumulation_zone(pair, current_price)
+            if not passed_smc or ob_edge_price >= current_price:
                 continue
+
+            # --- THE DYNAMIC R:R TARGET MATH (SPOT) ---
+            # 1. Calculate distance from entry to bottom of FVG
+            risk_distance = current_price - ob_edge_price 
+            
+            # 2. Multiply by R:R configuration to set TP target
+            rr_multiplier = SPOT_CONFIG["risk_reward_multiplier"]
+            dynamic_tp1 = current_price + (risk_distance * rr_multiplier)
 
             # --- LAYER 5: DYNAMIC RISK ALLOCATION ---
             trade_usdt = get_dynamic_spot_margin(available_usdt, atr, current_price)
@@ -321,22 +305,28 @@ def run_spot_scalper_tick() -> str:
                     qty = float(live_exchange.amount_to_precision(symbol, qty))
                     order = live_exchange.create_order(symbol, "market", "buy", qty)
                     current_price = float(order.get("average", current_price))
+                    
+                    risk_distance = current_price - ob_edge_price 
+                    dynamic_tp1 = current_price + (risk_distance * rr_multiplier)
                 except Exception as e:
                     add_log("ERROR", "api_execution", f"Failed LIVE ENTRY for {pair}: {e}")
                     continue
 
+            # In Spot, current_sl stays 0.0 because it is a strict accumulator
             execute_query(
                 """
                 INSERT INTO spot_trades (
-                    account_id, pair, trade_mode, status, entry_price, qty, remaining_qty, notional_usdt, opened_at
-                ) VALUES (?, ?, ?, 'OPEN', ?, ?, ?, ?, ?)
+                    account_id, pair, trade_mode, status, entry_price, qty, remaining_qty, notional_usdt, 
+                    ob_edge_price, current_sl, dynamic_tp1, watermark_price, opened_at
+                ) VALUES (?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (acct_id, pair, CURRENT_MODE, current_price, qty, qty, trade_usdt, now_str), commit=True
+                (acct_id, pair, CURRENT_MODE, current_price, qty, qty, trade_usdt, 
+                 ob_edge_price, 0.0, dynamic_tp1, current_price, now_str), commit=True
             )
 
             execute_query("UPDATE accounts SET spot_balance_usdt = ? WHERE account_id = ?", (balance - trade_usdt, acct_id), commit=True)
 
-            msg = f"[{fresh_acct['display_name']}] {CURRENT_MODE} SPOT ENTRY: Bought {pair} at ${current_price:,.4f} (${trade_usdt:.2f})\n🧠 Sniper Logic: {smc_reason}"
+            msg = f"[{fresh_acct['display_name']}] {CURRENT_MODE} SPOT ENTRY: Bought {pair} at ${current_price:,.4f} (${trade_usdt:.2f})\n🎯 TP Target Locked @ ${dynamic_tp1:.4f} (No SL)\n🧠 Sniper Logic: {smc_reason}"
             add_log("INFO", "apextick_bot", msg)
             activity_summary.append(msg)
             break  
