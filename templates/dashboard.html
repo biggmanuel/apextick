@@ -36,7 +36,7 @@
             padding: 20px;
         }
 
-        .container { max-width: 1500px; margin: 0 auto; }
+        .container { max-width: 1600px; margin: 0 auto; }
 
         /* --- HEADER & GOD MODE CONTROLS --- */
         .header {
@@ -184,8 +184,11 @@
         .tag.short { background: rgba(255,71,87,0.1); color: var(--loss); border: 1px solid rgba(255,71,87,0.3); }
         .tag.spot { background: rgba(0,212,255,0.1); color: var(--accent-cyan); border: 1px solid rgba(0,212,255,0.3); }
 
-        .tp-badge { display: inline-block; width: 24px; height: 24px; line-height: 24px; text-align: center; border-radius: 50%; font-size: 0.65rem; font-weight: 800; margin-right: 4px; border: 1px solid var(--text-muted); color: var(--text-muted); }
-        .tp-badge.active { border-color: var(--profit); background: rgba(0,255,136,0.15); color: var(--profit); box-shadow: 0 0 8px rgba(0,255,136,0.4); }
+        /* 75/25 SNIPER VISUALS */
+        .sniper-badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 0.65rem; font-weight: 800; border: 1px solid var(--text-muted); color: var(--text-muted); margin-right: 4px; }
+        .sniper-badge.active-secure { border-color: var(--profit); background: rgba(0,255,136,0.15); color: var(--profit); }
+        .sniper-badge.active-breakeven { border-color: var(--accent-cyan); background: rgba(0,212,255,0.15); color: var(--accent-cyan); }
+        .watermark-sub { font-size: 0.7rem; color: var(--text-muted); display: block; margin-top: 2px;}
 
         .btn-close { background: rgba(255,71,87,0.15); color: var(--loss); border: 1px solid var(--loss); padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 0.75rem; font-weight: 700; transition: 0.2s; }
         .btn-close:hover { background: var(--loss); color: #fff; box-shadow: 0 0 12px var(--loss); }
@@ -206,7 +209,7 @@
 <div class="container">
     <!-- Header & God Mode Controls -->
     <div class="header">
-        <div class="header-title">⚡ {{ bot_name }}</div>
+        <div class="header-title">⚡ {{ bot_name }} : 75/25 Sniper Engine</div>
         
         <div class="god-mode-controls">
             <label class="text-warning">
@@ -297,7 +300,7 @@
 
         <!-- SMC Battle Map (Spot) -->
         <div class="widget">
-            <div class="widget-header" style="color: var(--profit);">SMC BATTLE MAP (SPOT)</div>
+            <div class="widget-header" style="color: var(--profit);">SMC BATTLE MAP</div>
             <table class="mini-table">
                 <thead>
                     <tr>
@@ -314,20 +317,19 @@
         </div>
     </div>
 
-    <!-- Active Positions Table -->
+    <!-- Active Positions Table (Sniper Interface) -->
     <div class="table-container">
-        <div style="font-size: 1.1rem; color: var(--accent-cyan); font-weight: 700; margin-bottom: 16px;">ACTIVE DEPLOYMENT LOG</div>
+        <div style="font-size: 1.1rem; color: var(--accent-cyan); font-weight: 700; margin-bottom: 16px;">ACTIVE DEPLOYMENT LOG (75/25 SNIPER)</div>
         <table>
             <thead>
                 <tr>
                     <th>Pair</th>
                     <th>Type</th>
-                    <th>Entry</th>
-                    <th>Live Price</th>
+                    <th>Entry & SMC Target</th>
+                    <th>Live & Stop-Loss</th>
                     <th>Position Size</th>
                     <th>Current PnL</th>
-                    <th>Peak / Worst (ROI)</th>
-                    <th>Scale-Out Tiers</th>
+                    <th>SMC Protocol</th>
                     <th>Actions</th>
                 </tr>
             </thead>
@@ -337,30 +339,53 @@
         </table>
     </div>
 
-    <!-- Bottom Split: History & Logs -->
+    <!-- Split Trade History (Spot & Futures Side by Side) -->
     <div class="widget-row" style="grid-template-columns: 1fr 1fr;">
+        
+        <!-- Futures History Table -->
         <div class="table-container" style="margin-bottom: 0;">
-            <div style="font-size: 1rem; color: var(--text-primary); font-weight: 700; margin-bottom: 16px;">RECENT EXITS</div>
+            <div style="font-size: 1rem; color: var(--text-primary); font-weight: 700; margin-bottom: 16px;">FUTURES EXITS</div>
             <table>
                 <thead>
                     <tr>
+                        <th>Date/Time</th>
                         <th>Pair</th>
-                        <th>Type</th>
-                        <th>Exit Price</th>
+                        <th>Exit Type</th>
                         <th>Realized PnL</th>
+                        <th>PnL %</th>
                     </tr>
                 </thead>
-                <tbody id="history-tbody">
+                <tbody id="futures-history-tbody">
                     <!-- Injected via JS -->
                 </tbody>
             </table>
         </div>
 
-        <div>
-            <div style="font-size: 1rem; color: var(--text-primary); font-weight: 700; margin-bottom: 16px; padding-left: 4px;">SYSTEM LOGS</div>
-            <div class="logs-box" id="logs-box">
-                <!-- Injected via JS -->
-            </div>
+        <!-- Spot History Table -->
+        <div class="table-container" style="margin-bottom: 0;">
+            <div style="font-size: 1rem; color: var(--text-primary); font-weight: 700; margin-bottom: 16px;">SPOT EXITS</div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Date/Time</th>
+                        <th>Pair</th>
+                        <th>Exit Price</th>
+                        <th>Realized Profit</th>
+                        <th>PnL %</th>
+                    </tr>
+                </thead>
+                <tbody id="spot-history-tbody">
+                    <!-- Injected via JS -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- System Logs at the Bottom -->
+    <div class="table-container">
+        <div style="font-size: 1rem; color: var(--text-primary); font-weight: 700; margin-bottom: 16px;">SYSTEM LOGS</div>
+        <div class="logs-box" id="logs-box">
+            <!-- Injected via JS -->
         </div>
     </div>
 </div>
@@ -368,7 +393,21 @@
 <script>
     const formatCurrency = (val) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(val);
     
-    // Store positions globally for the Panic Button
+    // Dynamic precision formatter
+    function formatPrice(price) {
+        const val = parseFloat(price);
+        if (isNaN(val)) return price;
+        if (val < 0.001) return val.toFixed(8);
+        if (val < 1) return val.toFixed(5);
+        return val.toFixed(4);
+    }
+    
+    // Safe timestamp formatter
+    function safeFormatTime(timeStr) {
+        if (!timeStr) return "--/--/---- --:--";
+        return timeStr.replace('T', ' ').split('.')[0]; 
+    }
+    
     let currentOpenPositions = [];
 
     // --- GOD MODE CONTROLS ---
@@ -377,7 +416,7 @@
         const isLive = document.getElementById('live-toggle').checked;
         const adminKey = prompt(`Enter Admin Key to switch to ${isLive ? "LIVE FUNDS" : "PAPER TRADING"}:`);
         if (!adminKey) {
-            document.getElementById('live-toggle').checked = !isLive; // Revert visually
+            document.getElementById('live-toggle').checked = !isLive; 
             return;
         }
         try {
@@ -506,7 +545,7 @@
                 tbodyPowder.innerHTML += `
                     <tr>
                         <td style="font-weight:700;">${p.pair}</td>
-                        <td class="font-mono">$${p.last_price.toFixed(4)}</td>
+                        <td class="font-mono">$${formatPrice(p.last_price)}</td>
                         <td class="font-mono text-loss">${p.oi_spot_ratio.toFixed(2)}x</td>
                     </tr>`;
             });
@@ -524,7 +563,7 @@
                         <td style="font-weight:700;">${s.pair}</td>
                         <td class="font-mono" style="font-size:0.7rem;">${s.pool_type}</td>
                         <td class="${dClass}" style="font-size:0.75rem;">${s.direction}</td>
-                        <td class="font-mono" style="font-size:0.75rem;">$${s.bottom_price.toFixed(4)} - $${s.top_price.toFixed(4)}</td>
+                        <td class="font-mono" style="font-size:0.75rem;">$${formatPrice(s.bottom_price)} - $${formatPrice(s.top_price)}</td>
                     </tr>`;
             });
 
@@ -545,40 +584,54 @@
             document.getElementById('kpi-open-pos').innerText = futStat.open_positions + spotStat.open_positions;
             document.getElementById('kpi-portfolio').innerText = formatCurrency(futStat.portfolio_value + spotStat.portfolio_value);
 
-            // 6. Live Positions
+            // 6. Live Positions (75/25 Sniper Interface)
             const resPos = await fetch('/api/positions');
             const positions = await resPos.json();
-            currentOpenPositions = positions; // Save for Panic Button
+            currentOpenPositions = positions; 
             
             const tbodyPos = document.getElementById('positions-tbody');
             tbodyPos.innerHTML = "";
             
             if (positions.length === 0) {
-                tbodyPos.innerHTML = `<tr><td colspan="9" style="text-align: center; color: var(--text-muted);">No active positions. Scanning matrices...</td></tr>`;
+                tbodyPos.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--text-muted);">No active positions. Scanning SMC zones...</td></tr>`;
             } else {
                 positions.forEach(p => {
                     const isProfit = p.pnl_usdt >= 0;
                     const pnlClass = isProfit ? "text-profit" : "text-loss";
                     const tagClass = p.direction === "LONG" ? "long" : (p.direction === "SHORT" ? "short" : "spot");
                     
-                    const peakWorst = p.type === "futures" 
-                        ? `<span class="text-profit font-mono">+${p.peak_roi.toFixed(1)}%</span> / <span class="text-loss font-mono">${(p.worst_roi || 0).toFixed(1)}%</span>`
-                        : `<span style="color: var(--text-muted)">N/A (Spot)</span>`;
+                    const targetLabel = p.type === "spot" ? "TARGET" : "TP1";
+                    
+                    // Format Entry and Target using formatPrice
+                    const rawEntry = parseFloat(p.entry.replace(/[^0-9.-]+/g,"")); 
+                    const entryFormatted = formatPrice(rawEntry);
+                    const tpFormatted = formatPrice(p.dynamic_tp1);
+                    const entryData = `<span class="font-mono">$${entryFormatted}</span><span class="watermark-sub">${targetLabel}: $${tpFormatted}</span>`;
+                    
+                    // Format Live Price and SL using formatPrice
+                    const rawLive = parseFloat(p.live_price.replace(/[^0-9.-]+/g,""));
+                    const liveFormatted = formatPrice(rawLive);
+                    const slFormatted = formatPrice(p.current_sl);
+                    const liveData = `<span class="font-mono">$${liveFormatted}</span><span class="watermark-sub">SL: $${slFormatted}</span>`;
+                    
+                    let protocolHtml = "";
+                    if (p.tp1) {
+                        protocolHtml += `<span class="sniper-badge active-secure">75% SECURED</span>`;
+                        protocolHtml += `<span class="sniper-badge active-breakeven">B.E. ACTIVE</span>`;
+                        protocolHtml += `<span class="watermark-sub">Peak: $${formatPrice(p.watermark)}</span>`;
+                    } else {
+                        protocolHtml += `<span class="sniper-badge">AWAITING TP1</span>`;
+                    }
 
                     tbodyPos.innerHTML += `
                         <tr>
                             <td style="font-weight: 700;">${p.pair}</td>
                             <td><span class="tag ${tagClass}">${p.direction}</span></td>
-                            <td class="font-mono">${p.entry}</td>
-                            <td class="font-mono">${p.live_price}</td>
+                            <td>${entryData}</td>
+                            <td>${liveData}</td>
                             <td>${p.size}</td>
                             <td class="${pnlClass} font-mono font-weight-700">${p.pnl_formatted}</td>
-                            <td>${peakWorst}</td>
-                            <td>
-                                <span class="tp-badge ${p.tp1 ? "active" : ""}">1</span>
-                                <span class="tp-badge ${p.tp2 ? "active" : ""}">2</span>
-                                <span class="tp-badge ${p.tp3 ? "active" : ""}">3</span>
-                            </td>
+                            <td>${protocolHtml}</td>
                             <td>
                                 <button class="btn-close" onclick="forceClose('${p.type}', ${p.id})">Force Close</button>
                             </td>
@@ -587,6 +640,55 @@
                 });
             }
 
+<<<<<<< HEAD
+            // 7. Split Trade History (Spot & Futures)
+            const resHist = await fetch('/api/trades');
+            const historyObj = await resHist.json();
+            
+            // Futures History Table
+            const tbodyFutHist = document.getElementById('futures-history-tbody');
+            tbodyFutHist.innerHTML = "";
+            if (historyObj.futures_trades.length === 0) {
+                tbodyFutHist.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">No closed futures trades yet.</td></tr>`;
+            } else {
+                historyObj.futures_trades.forEach(h => {
+                    const pnl = parseFloat(h.realized_pnl);
+                    const pnlPct = parseFloat(h.pnl_pct || h.profit_pct || 0); 
+                    const isProfit = pnl >= 0;
+                    const dateStr = safeFormatTime(h.closed_at);
+                    
+                    tbodyFutHist.innerHTML += `
+                        <tr>
+                            <td class="font-mono" style="font-size:0.75rem; color:var(--text-muted);">${dateStr}</td>
+                            <td style="font-weight: 700;">${h.pair}</td>
+                            <td class="font-mono" style="font-size:0.75rem;">${h.close_type || "UNKNOWN"}</td>
+                            <td class="${isProfit ? 'text-profit' : 'text-loss'} font-mono">${isProfit ? '+' : ''}$${pnl.toFixed(2)}</td>
+                            <td class="${isProfit ? 'text-profit' : 'text-loss'} font-mono" style="font-size:0.8rem;">${isProfit ? '+' : ''}${pnlPct.toFixed(2)}%</td>
+                        </tr>
+                    `;
+                });
+            }
+
+            // Spot History Table 
+            const tbodySpotHist = document.getElementById('spot-history-tbody');
+            tbodySpotHist.innerHTML = "";
+            if (historyObj.spot_trades.length === 0) {
+                tbodySpotHist.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">No closed spot trades yet.</td></tr>`;
+            } else {
+                historyObj.spot_trades.forEach(h => {
+                    const pnl = parseFloat(h.realized_pnl);
+                    const pnlPct = parseFloat(h.profit_pct || h.pnl_pct || 0); 
+                    const isProfit = pnl >= 0;
+                    const dateStr = safeFormatTime(h.closed_at);
+                    
+                    tbodySpotHist.innerHTML += `
+                        <tr>
+                            <td class="font-mono" style="font-size:0.75rem; color:var(--text-muted);">${dateStr}</td>
+                            <td style="font-weight: 700;">${h.pair}</td>
+                            <td class="font-mono">$${formatPrice(h.exit_price)}</td>
+                            <td class="${isProfit ? 'text-profit' : 'text-loss'} font-mono">${isProfit ? '+' : ''}$${pnl.toFixed(2)}</td>
+                            <td class="${isProfit ? 'text-profit' : 'text-loss'} font-mono" style="font-size:0.8rem;">${isProfit ? '+' : ''}${pnlPct.toFixed(2)}%</td>
+=======
             // 7. Trade History (CORRECTED BLOCK)
             const resHist = await fetch('/api/trades');
             const history = await resHist.json();
@@ -606,6 +708,7 @@
                             <td><span class="tag ${h.type === 'SPOT' ? 'spot' : 'short'}">${h.type}</span></td>
                             <td class="font-mono">$${h.exit_price.toFixed(4)}</td>
                             <td class="${isProfit ? 'text-profit' : 'text-loss'} font-mono">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
+>>>>>>> 44907382aa7741fec8c952ad43b7f6a9c0af75a3
                         </tr>
                     `;
                 });
