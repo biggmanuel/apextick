@@ -104,46 +104,47 @@ def get_dynamic_margin(available_margin: float, atr: float, current_price: float
     
     return available_margin * (final_pct / 100.0)
 
-def check_micro_structure(pair: str, current_price: float) -> tuple[bool, str]:
-    """Fallback sniper trigger for non-Powder Keg assets."""
+def check_micro_structure(pair: str, current_price: float, direction: str) -> tuple[bool, str, float]:
+    """
+    SMC Snipe Integration for Futures. 
+    Requires price to tap an active Order Block or FVG matching the trend direction.
+    Returns: (is_valid, reason, ob_edge_price)
+    """
     try:
-        exchange = ccxt.binance({'enableRateLimit': True, 'timeout': 5000})
-        ohlcv = exchange.fetch_ohlcv(pair, timeframe='5m', limit=24)
-        if not ohlcv or len(ohlcv) < 20:
-            return False, "Insufficient data"
-
-        cumulative_vp, cumulative_vol, volumes = 0.0, 0.0, []
-        for k in ohlcv[:-1]: 
-            tp = (float(k[2]) + float(k[3]) + float(k[4])) / 3.0
-            v = float(k[5])
-            cumulative_vp += (tp * v)
-            cumulative_vol += v
-            volumes.append(v)
-
-        if cumulative_vol == 0: return False, "Zero volume baseline"
+        pools = execute_query(
+            """
+            SELECT pool_type, top_price, bottom_price 
+            FROM liquidity_pools 
+            WHERE pair = ? AND direction = ? AND status IN ('PENDING', 'MITIGATED')
+            ORDER BY created_at DESC LIMIT 3
+            """, (pair, direction), fetch_all=True
+        )
         
-        vwap = cumulative_vp / cumulative_vol
-        avg_vol = sum(volumes) / len(volumes)
-        recent_vol = max(float(ohlcv[-1][5]), float(ohlcv[-2][5]))
-        vol_multiplier = recent_vol / avg_vol if avg_vol > 0 else 0
+        if not pools:
+            return False, "No active SMC Zones found.", 0.0
 
-        vwap_tol = MARKET_SCANNER_CONFIG.get("vwap_tolerance_pct", 100.0)
-        req_vol_mult = MARKET_SCANNER_CONFIG.get("volume_spike_multiplier", 0.0)
-        dist_pct = (abs(current_price - vwap) / vwap) * 100.0
+        for pool in pools:
+            top = pool["top_price"]
+            bottom = pool["bottom_price"]
+            
+            buffer = current_price * 0.002 
+            
+            if (bottom - buffer) <= current_price <= (top + buffer):
+                # The structural invalidation line changes based on direction
+                edge = bottom if direction == "LONG" else top
+                return True, f"Price mitigated {pool['pool_type']} ({direction})", edge
+                
+        return False, "Price outside active SMC zones.", 0.0
+    except Exception as e:
+        return False, f"Database error: {e}", 0.0
 
-        if dist_pct > vwap_tol: return False, f"Dist {dist_pct:.2f}% > {vwap_tol}%"
-        if vol_multiplier < req_vol_mult: return False, f"Vol {vol_multiplier:.1f}x < {req_vol_mult}x"
-
-        return True, f"VWAP Tap + Whale Volume ({vol_multiplier:.1f}x)"
-    except Exception:
-        return False, "API error"
 
 # =============================================================================
 # MAIN EXECUTION ENGINE
 # =============================================================================
 
 def run_futures_engine_tick() -> str:
-    """Master loop targeting Liquidation Cascades & Smart Management."""
+    """Master loop targeting SMC Snipes & 75/25 Risk Engine."""
     
     # 1. READ GOD-MODE STATE (Hot-Swap Live from Database)
     mode_row = execute_query("SELECT value FROM bot_settings WHERE key = 'paper_trading_enabled'", fetch_one=True)
@@ -160,7 +161,7 @@ def run_futures_engine_tick() -> str:
     now_str = datetime.now(timezone.utc).isoformat()
 
     # -------------------------------------------------------------------------
-    # PHASE 1: MANAGE OPEN POSITIONS (TRAILS & MACRO PANIC SELL)
+    # PHASE 1: MANAGE OPEN POSITIONS (75/25 SNIPER EXECUTION)
     # -------------------------------------------------------------------------
     for acct in accounts:
         acct_id = acct["account_id"]
@@ -189,16 +190,24 @@ def run_futures_engine_tick() -> str:
 
             peak_roi = max(float(trade.get("peak_roi_pct") or 0.0), roi_pct)
             worst_roi = min(float(trade.get("worst_roi_pct") or 0.0), roi_pct)
-            
-            execute_query(
-                "UPDATE futures_trades SET peak_roi_pct = ?, worst_roi_pct = ? WHERE id = ?",
-                (peak_roi, worst_roi, trade_id), commit=True
-            )
 
             orig_margin = float(trade["margin_usdt"])
             rem_margin = float(trade.get("remaining_margin_usdt") or orig_margin)
             accumulated_pnl = float(trade.get("pnl_usdt") or 0.0)
-            tp1_hit, tp2_hit = int(trade.get("tp1_hit") or 0), int(trade.get("tp2_hit") or 0)
+            
+            tp1_hit = int(trade.get("tp1_hit") or 0)
+            current_sl = float(trade.get("current_sl") or 0.0)
+            dynamic_tp1 = float(trade.get("dynamic_tp1") or 0.0)
+            watermark_price = float(trade.get("watermark_price") or entry_price)
+
+            # --- UPDATE WATERMARK & ROI MEMORY ---
+            if (direction == "LONG" and current_price > watermark_price) or (direction == "SHORT" and current_price < watermark_price):
+                watermark_price = current_price
+            
+            execute_query(
+                "UPDATE futures_trades SET peak_roi_pct = ?, worst_roi_pct = ?, watermark_price = ? WHERE id = ?",
+                (peak_roi, worst_roi, watermark_price, trade_id), commit=True
+            )
 
             # --- MACRO KILL-SWITCH (PANIC SELL) ---
             if is_halted:
@@ -233,93 +242,50 @@ def run_futures_engine_tick() -> str:
                 activity_summary.append(f"[{acct['display_name']}] 🚨 SHIELD ACTIVATED: {pair} flattened at ${current_price:,.4f}")
                 continue
 
-            # --- TIER 1 HIT (+20% ROI) ---
-            if roi_pct >= FUTURES_CONFIG["tp1_roi"] and not tp1_hit:
-                margin_to_close = min(orig_margin * FUTURES_CONFIG["tp1_close_ratio"], rem_margin)
+            # --- 75/25 SMC SNIPER EXIT PROTOCOL ---
+            close_reason = ""
+            margin_to_close = 0.0
+            full_close = False
+
+            # Long Logic
+            if direction == "LONG":
+                # Rule 1: Structural SL
+                if current_price <= current_sl and not tp1_hit:
+                    close_reason, margin_to_close, full_close = "STRUCTURAL SL (SMC Invalidated)", rem_margin, True
+                # Rule 2: TP1 (75% Secure)
+                elif current_price >= dynamic_tp1 and not tp1_hit:
+                    close_reason, margin_to_close, full_close = "TP1 SECURED (75% Bag Locked)", min(orig_margin * FUTURES_CONFIG["tp1_close_ratio"], rem_margin), False
+                # Rule 3: Breakeven Switch
+                elif current_price <= current_sl and tp1_hit:
+                    close_reason, margin_to_close, full_close = "BREAKEVEN SL (Runner Stopped at Entry)", rem_margin, True
+                # Rule 4: Trailing Runner
+                elif tp1_hit:
+                    trail_trigger = watermark_price * (1 - (FUTURES_CONFIG["trailing_buffer_pct"] / 100.0))
+                    if current_price <= trail_trigger and current_price > entry_price:
+                        close_reason, margin_to_close, full_close = f"TRAILING SL HIT (-3% from peak ${watermark_price:.4f})", rem_margin, True
+            
+            # Short Logic
+            else:
+                # Rule 1: Structural SL
+                if current_price >= current_sl and not tp1_hit:
+                    close_reason, margin_to_close, full_close = "STRUCTURAL SL (SMC Invalidated)", rem_margin, True
+                # Rule 2: TP1 (75% Secure)
+                elif current_price <= dynamic_tp1 and not tp1_hit:
+                    close_reason, margin_to_close, full_close = "TP1 SECURED (75% Bag Locked)", min(orig_margin * FUTURES_CONFIG["tp1_close_ratio"], rem_margin), False
+                # Rule 3: Breakeven Switch
+                elif current_price >= current_sl and tp1_hit:
+                    close_reason, margin_to_close, full_close = "BREAKEVEN SL (Runner Stopped at Entry)", rem_margin, True
+                # Rule 4: Trailing Runner
+                elif tp1_hit:
+                    trail_trigger = watermark_price * (1 + (FUTURES_CONFIG["trailing_buffer_pct"] / 100.0))
+                    if current_price >= trail_trigger and current_price < entry_price:
+                        close_reason, margin_to_close, full_close = f"TRAILING SL HIT (+3% from peak ${watermark_price:.4f})", rem_margin, True
+
+
+            # --- EXECUTE APPLICABLE EXIT PROTOCOL ---
+            if close_reason:
                 notional_closed = margin_to_close * leverage
                 
-                if not is_paper:
-                    try:
-                        symbol, side = pair.replace("/", ""), "sell" if direction == "LONG" else "buy"
-                        live_exchange.load_markets()
-                        qty = live_exchange.amount_to_precision(symbol, notional_closed / current_price)
-                        live_exchange.create_order(symbol, "market", side, qty)
-                    except Exception: continue
-                
-                net_partial_pnl = (margin_to_close * (roi_pct / 100.0)) - (notional_closed * (FUTURES_CONFIG["fee_pct"] / 100.0))
-                
-                execute_query(
-                    """
-                    INSERT INTO futures_trades (
-                        account_id, pair, trade_mode, direction, status, entry_price, exit_price,
-                        margin_usdt, remaining_margin_usdt, notional_usdt, leverage, pnl_usdt, pnl_pct, close_type, tp1_hit, opened_at, closed_at
-                    ) VALUES (?, ?, ?, ?, 'CLOSED', ?, ?, ?, 0.0, ?, ?, ?, ?, 'TP1 (+20% ROI)', 1, ?, ?)
-                    """,
-                    (acct_id, pair, CURRENT_MODE, direction, entry_price, current_price, margin_to_close, notional_closed, leverage, net_partial_pnl, roi_pct, trade["opened_at"], now_str),
-                    commit=True
-                )
-
-                execute_query("UPDATE futures_trades SET remaining_margin_usdt = ?, pnl_usdt = ?, pnl_pct = ?, tp1_hit = 1 WHERE id = ?",
-                              (rem_margin - margin_to_close, accumulated_pnl + net_partial_pnl, roi_pct, trade_id), commit=True)
-                
-                balance += (margin_to_close + net_partial_pnl)
-                w_pool = net_partial_pnl * FUTURES_CONFIG["withdraw_split_pct"] if net_partial_pnl > 0 else 0.0
-                execute_query("UPDATE accounts SET futures_balance_usdt = ?, futures_live_withdraw = futures_live_withdraw + ? WHERE account_id = ?",
-                              (balance, w_pool, acct_id), commit=True)
-                activity_summary.append(f"[{CURRENT_MODE}] TP1 HIT: Scaled 30% out of {pair} | Locked: +${net_partial_pnl:.2f}")
-                continue
-
-            # --- TIER 2 HIT (+50% ROI) ---
-            elif roi_pct >= FUTURES_CONFIG["tp2_roi"] and not tp2_hit:
-                margin_to_close = min(orig_margin * FUTURES_CONFIG["tp2_close_ratio"], rem_margin)
-                notional_closed = margin_to_close * leverage
-                
-                if not is_paper:
-                    try:
-                        symbol, side = pair.replace("/", ""), "sell" if direction == "LONG" else "buy"
-                        live_exchange.load_markets()
-                        qty = live_exchange.amount_to_precision(symbol, notional_closed / current_price)
-                        live_exchange.create_order(symbol, "market", side, qty)
-                    except Exception: continue
-                
-                net_partial_pnl = (margin_to_close * (roi_pct / 100.0)) - (notional_closed * (FUTURES_CONFIG["fee_pct"] / 100.0))
-                
-                execute_query(
-                    """
-                    INSERT INTO futures_trades (
-                        account_id, pair, trade_mode, direction, status, entry_price, exit_price,
-                        margin_usdt, remaining_margin_usdt, notional_usdt, leverage, pnl_usdt, pnl_pct, close_type, tp1_hit, tp2_hit, opened_at, closed_at
-                    ) VALUES (?, ?, ?, ?, 'CLOSED', ?, ?, ?, 0.0, ?, ?, ?, ?, 'TP2 (+50% ROI)', tp1_hit, 1, ?, ?)
-                    """,
-                    (acct_id, pair, CURRENT_MODE, direction, entry_price, current_price, margin_to_close, notional_closed, leverage, net_partial_pnl, roi_pct, trade["opened_at"], now_str),
-                    commit=True
-                )
-
-                execute_query("UPDATE futures_trades SET remaining_margin_usdt = ?, pnl_usdt = ?, pnl_pct = ?, tp2_hit = 1 WHERE id = ?",
-                              (rem_margin - margin_to_close, accumulated_pnl + net_partial_pnl, roi_pct, trade_id), commit=True)
-                
-                balance += (margin_to_close + net_partial_pnl)
-                w_pool = net_partial_pnl * FUTURES_CONFIG["withdraw_split_pct"] if net_partial_pnl > 0 else 0.0
-                execute_query("UPDATE accounts SET futures_balance_usdt = ?, futures_live_withdraw = futures_live_withdraw + ? WHERE account_id = ?",
-                              (balance, w_pool, acct_id), commit=True)
-                activity_summary.append(f"[{CURRENT_MODE}] TP2 HIT: Scaled 40% out of {pair} | Locked: +${net_partial_pnl:.2f}")
-                continue
-
-            # --- OUTLIER RUNNER ENGINE (MATHEMATICAL TRAILING CALLBACK) ---
-            outlier_triggered, close_label = False, ""
-            if peak_roi >= FUTURES_CONFIG.get("outlier_arm_roi", 80.0):
-                if (peak_roi - roi_pct) >= FUTURES_CONFIG.get("outlier_trail_buffer_pct", 25.0):
-                    outlier_triggered, close_label = True, f"TP3 Trailing Peak Trigger (+{roi_pct:.1f}% ROI)"
-                elif roi_pct >= FUTURES_CONFIG.get("hard_tp3_cap_roi", 400.0):
-                    outlier_triggered, close_label = True, f"TP3 Hard Cap Reached (+{roi_pct:.1f}% ROI)"
-
-            # --- STRUCTURAL & CANDLE STOP LOSS ---
-            if not outlier_triggered:
-                if roi_pct <= FUTURES_CONFIG["hard_sl_roi_pct"]: close_label = "STRUCTURAL SL"
-                elif roi_pct <= FUTURES_CONFIG["candle_sl_roi_pct"] and peak_roi < 2.5: close_label = "CANDLE SL"
-
-            if outlier_triggered or close_label:
-                notional_closed = rem_margin * leverage
                 if not is_paper:
                     try:
                         symbol, side = pair.replace("/", ""), "sell" if direction == "LONG" else "buy"
@@ -330,33 +296,45 @@ def run_futures_engine_tick() -> str:
                         add_log("ERROR", "api_execution", f"Failed LIVE exit for {pair}: {e}")
                         continue
                 
-                net_pnl = (rem_margin * (roi_pct / 100.0)) - (notional_closed * (FUTURES_CONFIG["fee_pct"] / 100.0))
+                net_pnl = (margin_to_close * (roi_pct / 100.0)) - (notional_closed * (FUTURES_CONFIG["fee_pct"] / 100.0))
 
-                execute_query(
-                    """
-                    UPDATE futures_trades
-                    SET status = 'CLOSED', exit_price = ?, remaining_margin_usdt = 0.0,
-                        margin_usdt = ?, notional_usdt = ?, pnl_usdt = ?, pnl_pct = ?, close_type = ?, closed_at = ?
-                    WHERE id = ?
-                    """,
-                    (current_price, rem_margin, notional_closed, net_pnl, roi_pct, close_label, now_str, trade_id),
-                    commit=True
-                )
-
-                balance += max(0.0, rem_margin + net_pnl)
-                w_pool = (net_pnl * FUTURES_CONFIG["withdraw_split_pct"]) if net_pnl > 0 and 'TP3' in close_label else 0.0
+                if full_close:
+                    execute_query(
+                        """
+                        UPDATE futures_trades
+                        SET status = 'CLOSED', exit_price = ?, remaining_margin_usdt = 0.0,
+                            pnl_usdt = ?, pnl_pct = ?, close_type = ?, closed_at = ?
+                        WHERE id = ?
+                        """,
+                        (current_price, accumulated_pnl + net_pnl, roi_pct, close_reason, now_str, trade_id), commit=True
+                    )
+                    log_level = "SUCCESS" if (accumulated_pnl + net_pnl) > 0 else "WARNING"
+                    msg = f"[{acct['display_name']}] {CURRENT_MODE} {close_reason}: {pair} {direction} closed. Final PnL: ${accumulated_pnl + net_pnl:+.2f}"
+                else: # TP1 Partial Close
+                    execute_query(
+                        """
+                        UPDATE futures_trades 
+                        SET remaining_margin_usdt = ?, pnl_usdt = ?, pnl_pct = ?, tp1_hit = 1, current_sl = ? 
+                        WHERE id = ?
+                        """,
+                        (rem_margin - margin_to_close, accumulated_pnl + net_pnl, roi_pct, entry_price, trade_id), commit=True
+                    )
+                    msg = f"[{CURRENT_MODE}] {close_reason}: {pair} | Locked: +${net_pnl:.2f} | SL moved to Breakeven."
+                    log_level = "SUCCESS"
+                
+                balance += max(0.0, margin_to_close + net_pnl)
+                # Only split profits to withdrawal pool on a full close (TP2 hit)
+                w_pool = (net_pnl * FUTURES_CONFIG["withdraw_split_pct"]) if net_pnl > 0 and full_close else 0.0
                 
                 execute_query("UPDATE accounts SET futures_balance_usdt = ?, futures_live_withdraw = futures_live_withdraw + ? WHERE account_id = ?",
                               (balance, w_pool, acct_id), commit=True)
                 
-                log_level = "SUCCESS" if net_pnl > 0 else "WARNING"
-                msg = f"[{acct['display_name']}] {CURRENT_MODE} {close_label}: {pair} {direction} closed at ${current_price:,.4f} | PnL: ${net_pnl:+.2f}"
                 add_log(log_level, "apextick_bot", msg)
                 activity_summary.append(msg)
 
 
     # -------------------------------------------------------------------------
-    # PHASE 2: EVALUATE NEW ENTRIES (THE POWDER KEG HUNTER)
+    # PHASE 2: EVALUATE NEW ENTRIES (SMC & POWDER KEG HUNTER)
     # -------------------------------------------------------------------------
     if is_halted:
         return " | ".join(activity_summary) if activity_summary else "Futures Entries Disabled: MACRO KILL-SWITCH ACTIVE."
@@ -407,7 +385,7 @@ def run_futures_engine_tick() -> str:
 
             oi_ratio = float(p_info.get("oi_spot_ratio", 0.0))
             atr = float(p_info.get("atr", 0.0))
-            entry_price = get_live_price_safely(pair)
+            current_price = get_live_price_safely(pair)
             
             target_direction, entry_reason = None, ""
 
@@ -422,15 +400,30 @@ def run_futures_engine_tick() -> str:
                 if btc_trend == "BULLISH" and buy_pressure >= 50.0: target_direction = "LONG"
                 elif btc_trend == "BEARISH" and buy_pressure < 50.0: target_direction = "SHORT"
                 
-                if target_direction:
-                    passed_micro, micro_reason = check_micro_structure(pair, entry_price)
-                    if not passed_micro: continue
-                    entry_reason = f"Structural Logic: {micro_reason} | Macro: {btc_trend}"
-
             if not target_direction: continue
 
+            # --- LAYER 3: SMC ORDER BLOCK TRIGGER ---
+            passed_smc, smc_reason, ob_edge_price = check_micro_structure(pair, current_price, target_direction)
+            if not passed_smc: continue
+
+            # Validate entry isn't already past invalidation
+            if (target_direction == "LONG" and current_price < ob_edge_price) or (target_direction == "SHORT" and current_price > ob_edge_price):
+                continue
+                
+            entry_reason = f"SMC Zone: {smc_reason} | Macro: {btc_trend}"
+
+            # --- THE DYNAMIC R:R TARGET MATH ---
+            rr_multiplier = FUTURES_CONFIG["risk_reward_multiplier"]
+            risk_distance = abs(current_price - ob_edge_price)
+            
+            if target_direction == "LONG":
+                dynamic_tp1 = current_price + (risk_distance * rr_multiplier)
+            else:
+                dynamic_tp1 = current_price - (risk_distance * rr_multiplier)
+
+
             # --- LAYER 5: DYNAMIC RISK ALLOCATION ---
-            target_margin_usdt = get_dynamic_margin(available_margin, atr, entry_price)
+            target_margin_usdt = get_dynamic_margin(available_margin, atr, current_price)
             margin_usdt = max(FUTURES_CONFIG["min_margin_usdt"], min(target_margin_usdt, available_margin))
             
             notional_value = margin_usdt * FUTURES_CONFIG["leverage"]
@@ -440,10 +433,14 @@ def run_futures_engine_tick() -> str:
                     symbol, side = pair.replace("/", ""), "buy" if target_direction == "LONG" else "sell"
                     live_exchange.set_leverage(FUTURES_CONFIG["leverage"], symbol)
                     live_exchange.load_markets()
-                    qty = live_exchange.amount_to_precision(symbol, notional_value / entry_price)
+                    qty = live_exchange.amount_to_precision(symbol, notional_value / current_price)
                     
                     order = live_exchange.create_order(symbol, "market", side, qty)
-                    entry_price = float(order.get("average", entry_price))
+                    current_price = float(order.get("average", current_price))
+                    
+                    # Recalculate targets based on live exchange execution price
+                    risk_distance = abs(current_price - ob_edge_price)
+                    dynamic_tp1 = current_price + (risk_distance * rr_multiplier) if target_direction == "LONG" else current_price - (risk_distance * rr_multiplier)
                 except Exception as e:
                     add_log("ERROR", "api_execution", f"Failed LIVE ENTRY for {pair}: {e}")
                     continue
@@ -452,18 +449,20 @@ def run_futures_engine_tick() -> str:
                 """
                 INSERT INTO futures_trades (
                     account_id, pair, trade_mode, direction, status, entry_price, 
-                    margin_usdt, remaining_margin_usdt, notional_usdt, leverage, opened_at
-                ) VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?)
+                    margin_usdt, remaining_margin_usdt, notional_usdt, leverage,
+                    ob_edge_price, current_sl, dynamic_tp1, watermark_price, opened_at
+                ) VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (acct_id, pair, CURRENT_MODE, target_direction, entry_price, margin_usdt, margin_usdt, notional_value, FUTURES_CONFIG["leverage"], now_str), 
+                (acct_id, pair, CURRENT_MODE, target_direction, current_price, margin_usdt, margin_usdt, notional_value, FUTURES_CONFIG["leverage"], 
+                 ob_edge_price, ob_edge_price, dynamic_tp1, current_price, now_str), 
                 commit=True
             )
             
             execute_query("UPDATE accounts SET futures_balance_usdt = ? WHERE account_id = ?", (balance - margin_usdt, acct_id), commit=True)
             
-            msg = f"[{fresh_acct['display_name']}] {CURRENT_MODE} ENTRY: {target_direction} on {pair} at ${entry_price:,.4f} (Margin: ${margin_usdt:.2f} @ {FUTURES_CONFIG['leverage']}x)\n🧠 Trigger: {entry_reason}"
+            msg = f"[{fresh_acct['display_name']}] {CURRENT_MODE} ENTRY: {target_direction} on {pair} at ${current_price:,.4f} (Margin: ${margin_usdt:.2f} @ {FUTURES_CONFIG['leverage']}x)\n🎯 Risk/Reward Locked: SL @ ${ob_edge_price:.4f} | TP1 @ ${dynamic_tp1:.4f}\n🧠 Trigger: {entry_reason}"
             add_log("INFO", "apextick_bot", msg)
             activity_summary.append(msg)
             break 
 
-    return " | ".join(activity_summary) if activity_summary else "Futures Engine: Monitoring Open Positions & Scanning for Powder Kegs."
+    return " | ".join(activity_summary) if activity_summary else "Futures Engine: Monitoring SMC Pools & Powder Kegs."
