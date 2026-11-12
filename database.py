@@ -29,6 +29,8 @@ def get_connection():
         conn.row_factory = sqlite3.Row
         # Enable concurrent read/writes to stop "database is locked" errors
         conn.execute("PRAGMA journal_mode=WAL;")
+        # Enable concurrent read/writes to stop "database is locked" errors
+        conn.execute("PRAGMA journal_mode=WAL;")
         return conn
 
 def execute_query(query: str, params: tuple = (), fetch_one: bool = False, fetch_all: bool = False, commit: bool = False):
