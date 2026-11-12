@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 # =============================================================================
 # APEXTICK: MASTER DATABASE CONFIGURATION (INSTITUTIONAL QUANT SCHEMA)
+# (Upgraded for 75/25 SMC Sniper Architecture)
 # =============================================================================
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -58,8 +59,7 @@ def execute_query(query: str, params: tuple = (), fetch_one: bool = False, fetch
 def init_db():
     """
     Initializes the database schema. 
-    Upgraded for Smart Money Concepts (SMC), Regime Detection, Live Toggles, 
-    and Concurrent Write-Ahead Logging (WAL).
+    Upgraded for Smart Money Concepts (SMC), Regime Detection, and Live Toggles.
     """
     pk = "SERIAL PRIMARY KEY" if IS_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
     
@@ -110,6 +110,19 @@ def init_db():
         except Exception:
             pass # Column already exists, proceed normally
 
+    # --- DYNAMIC MIGRATION: Inject Take-Profit tracking columns into existing trade tables ---
+    tp_columns = {
+        "tp1_hit": "INTEGER DEFAULT 0",
+        "tp2_hit": "INTEGER DEFAULT 0",
+        "tp3_hit": "INTEGER DEFAULT 0"
+    }
+    for table in ["spot_trades", "futures_trades"]:
+        for col, col_type in tp_columns.items():
+            try:
+                execute_query(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}", commit=True)
+            except Exception:
+                pass # Column already exists, proceed normally
+    
     # 3. Spot Trades (Upgraded for SMC execution and Paper/Live separation)
     execute_query(f"""
         CREATE TABLE IF NOT EXISTS spot_trades (
@@ -125,15 +138,20 @@ def init_db():
             notional_usdt REAL NOT NULL,
             profit_usdt REAL DEFAULT 0.0,
             profit_pct REAL DEFAULT 0.0,
+            
+            -- NEW 75/25 SNIPER COLUMNS
+            ob_edge_price REAL DEFAULT 0.0,
+            current_sl REAL DEFAULT 0.0,
+            dynamic_tp1 REAL DEFAULT 0.0,
+            watermark_price REAL DEFAULT 0.0,
             tp1_hit INTEGER DEFAULT 0,
-            tp2_hit INTEGER DEFAULT 0,
-            tp3_hit INTEGER DEFAULT 0,
+            
             opened_at TEXT NOT NULL,
             closed_at TEXT
         )
     """, commit=True)
 
-    # 4. Futures Trades (Upgraded for Trailing Peaks and Liquidation Hunting)
+    # 4. Futures Trades (Upgraded for 75/25 SMC Sniper Execution)
     execute_query(f"""
         CREATE TABLE IF NOT EXISTS futures_trades (
             id {pk},
@@ -153,9 +171,14 @@ def init_db():
             close_type TEXT,
             peak_roi_pct REAL DEFAULT 0.0,
             worst_roi_pct REAL DEFAULT 0.0,
+            
+            -- NEW 75/25 SNIPER COLUMNS
+            ob_edge_price REAL DEFAULT 0.0,
+            current_sl REAL DEFAULT 0.0,
+            dynamic_tp1 REAL DEFAULT 0.0,
+            watermark_price REAL DEFAULT 0.0,
             tp1_hit INTEGER DEFAULT 0,
-            tp2_hit INTEGER DEFAULT 0,
-            tp3_hit INTEGER DEFAULT 0,
+            
             opened_at TEXT NOT NULL,
             closed_at TEXT
         )
@@ -263,4 +286,4 @@ def add_log(level: str, source: str, message: str):
 
 if __name__ == "__main__":
     init_db()
-    print("ApexTick Database Initialized with WAL Concurrency, SMC, and Dynamic Migrations.")
+    print("ApexTick Database Initialized with Smart Money Concepts, Regime Tracking, and God-Mode UI Memory.")
