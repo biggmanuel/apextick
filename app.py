@@ -48,14 +48,6 @@ def futures_engine_loop():
         except Exception as e: add_log("ERROR", "futures_engine", f"Execution Error: {e}")
         time.sleep(3)
 
-def dynamic_scanner_loop():
-    interval = MARKET_SCANNER_CONFIG.get("refresh_interval_minutes", 0.5) * 60
-    add_log("INFO", "system", f"Dynamic Scanner Thread Started (Tick: {interval}s).")
-    while True:
-        try: sync_binance_pairs()
-        except Exception as e: add_log("ERROR", "scanner", f"Market Scan Error: {e}")
-        time.sleep(interval)
-
 def start_background_services():
     """Initializes the Phase 1 & Phase 2 Quantitative Brains, then the Execution Arms."""
     init_db()
@@ -77,7 +69,6 @@ def start_background_services():
     grid = GridEngine()
     threading.Thread(target=grid.start, daemon=True).start()
     
-    threading.Thread(target=dynamic_scanner_loop, daemon=True).start()
     threading.Thread(target=spot_engine_loop, daemon=True).start()
     threading.Thread(target=futures_engine_loop, daemon=True).start()
 
