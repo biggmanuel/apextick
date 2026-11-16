@@ -334,7 +334,7 @@ def run_futures_engine_tick() -> str:
 
 
     # -------------------------------------------------------------------------
-    # PHASE 2: EVALUATE NEW ENTRIES (SMC & POWDER KEG HUNTER)
+    # PHASE 2: EVALUATE NEW ENTRIES (SMC & TREND)
     # -------------------------------------------------------------------------
     if is_halted:
         return " | ".join(activity_summary) if activity_summary else "Futures Entries Disabled: MACRO KILL-SWITCH ACTIVE."
@@ -344,7 +344,7 @@ def run_futures_engine_tick() -> str:
         SELECT pair, last_price, change_24h_pct, oi_spot_ratio, atr 
         FROM trading_pairs 
         WHERE status = 'ACTIVE' AND futures_supported = 1 AND last_price > 0
-        ORDER BY oi_spot_ratio DESC
+        ORDER BY volume_24h_usd DESC
         """, fetch_all=True
     )
     if not pairs: return "Execution halted: No valid pairs in database."
@@ -383,22 +383,19 @@ def run_futures_engine_tick() -> str:
             pair = p_info["pair"]
             if pair in ["BTC/USDT", "ETH/USDT", "BNB/USDT"] or pair in held_pairs: continue
 
-            oi_ratio = float(p_info.get("oi_spot_ratio", 0.0))
             atr = float(p_info.get("atr", 0.0))
             current_price = get_live_price_safely(pair)
             
-            target_direction, entry_reason = None, ""
+            target_direction = None
 
-            # --- LAYER 4: THE POWDER KEG MATRIX ---
-            if POWDER_KEG_CONFIG["enabled"] and oi_ratio >= POWDER_KEG_CONFIG["min_oi_spot_ratio"]:
-                if buy_pressure < 45.0: # Margin call cascade trigger (Retail panic selling)
-                    target_direction = "SHORT"
-                    entry_reason = f"POWDER KEG MATRIX: Massive Open Interest ({oi_ratio:.1f}x Spot Vol) + 1m Panic Execution"
-            
-            # --- LAYER 1: FALLBACK STRUCTURAL TREND ---
-            if not target_direction:
-                if btc_trend == "BULLISH" and buy_pressure >= 50.0: target_direction = "LONG"
-                elif btc_trend == "BEARISH" and buy_pressure < 50.0: target_direction = "SHORT"
+            # --- LAYER 1: STRUCTURAL TREND PRIORITY (Powder Keg Bypassed) ---
+            if btc_trend == "BULLISH": 
+                target_direction = "LONG"
+            elif btc_trend == "BEARISH": 
+                target_direction = "SHORT"
+            else:
+                # If BTC is Neutral/Choppy, let the local altcoin buy pressure decide the direction
+                target_direction = "LONG" if buy_pressure >= 50.0 else "SHORT"
                 
             if not target_direction: continue
 
@@ -465,4 +462,4 @@ def run_futures_engine_tick() -> str:
             activity_summary.append(msg)
             break 
 
-    return " | ".join(activity_summary) if activity_summary else "Futures Engine: Monitoring SMC Pools & Powder Kegs."
+    return " | ".join(activity_summary) if activity_summary else "Futures Engine: Monitoring SMC Pools."
