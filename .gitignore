@@ -1,2 +1,7 @@
 .env
 apextick.db
+apextick.db
+.env
+*.bak
+venv/
+__pycache__/

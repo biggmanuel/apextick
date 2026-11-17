@@ -117,7 +117,7 @@ def check_micro_structure(pair: str, current_price: float, direction: str) -> tu
             FROM liquidity_pools 
             WHERE pair = ? AND direction = ? AND status IN ('PENDING', 'MITIGATED')
             ORDER BY created_at DESC LIMIT 3
-            """, (pair, direction), fetch_all=True
+            """, (pair, "BULLISH" if direction == "LONG" else "BEARISH"), fetch_all=True
         )
         
         if not pools:
