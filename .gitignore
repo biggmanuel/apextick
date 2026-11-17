@@ -5,3 +5,4 @@ apextick.db
 *.bak
 venv/
 __pycache__/
+apextick.db-*
