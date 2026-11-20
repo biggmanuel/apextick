@@ -17,6 +17,42 @@ from btc_decline_signal import is_trading_allowed_by_btc_gate, MARKET_STATE
 FUTURES_ENTRY_COOLDOWN_SECONDS = 600  # Cooldown between new entries per account
 STALE_PRICE_THRESHOLD_SECONDS = 300   # Max allowed age for a fallback price
 
+# --- RISK CONTROLS (all tunable in config.py -> FUTURES_CONFIG; these are the fallbacks) ---
+MIN_STOP_PCT = FUTURES_CONFIG.get("min_stop_pct", 0.4)                  # stops tighter than this = noise
+MAX_STOP_PCT = FUTURES_CONFIG.get("max_stop_pct", 2.0)                  # stops wider than this = oversized loss
+RISK_PER_TRADE_USDT = FUTURES_CONFIG.get("risk_per_trade_usdt", 0.50)   # target loss if the stop is hit
+MAX_MARGIN_PCT_PER_TRADE = FUTURES_CONFIG.get("max_margin_pct_per_trade", 5.0)  # cap on margin vs balance
+PAIR_STOP_COOLDOWN_SECONDS = FUTURES_CONFIG.get("pair_stop_cooldown_seconds", 7200)   # after a stop-out
+PAIR_CLOSE_COOLDOWN_SECONDS = FUTURES_CONFIG.get("pair_close_cooldown_seconds", 1800) # after any other close
+MIN_VOLUME_24H_USD = FUTURES_CONFIG.get("min_volume_24h_usd", 20_000_000)
+SKIP_LOG_INTERVAL_SECONDS = FUTURES_CONFIG.get("skip_log_interval_seconds", 300)
+
+# --- SKIP-REASON TRACKING (one summary log line per interval instead of per-tick spam) ---
+_SKIP_STATS = {}
+_LAST_SKIP_LOG = time.time()
+COUNT_ONLY_REASONS = {"no_zone_at_price", "account_cooldown", "max_positions", "low_margin", "btc_gate_block"}
+
+def _note_skip(reason: str, pair: str):
+    bucket = _SKIP_STATS.setdefault(reason, {})
+    bucket[pair] = bucket.get(pair, 0) + 1
+
+def _flush_skip_log():
+    """Writes a single INFO line summarising why entries were skipped since the last flush."""
+    global _LAST_SKIP_LOG
+    if not _SKIP_STATS or (time.time() - _LAST_SKIP_LOG) < SKIP_LOG_INTERVAL_SECONDS:
+        return
+    parts = []
+    for reason, pairs in sorted(_SKIP_STATS.items(), key=lambda kv: -sum(kv[1].values())):
+        total = sum(pairs.values())
+        if reason in COUNT_ONLY_REASONS:
+            parts.append(f"{reason}: {total}")
+        else:
+            top = ", ".join(p for p, _ in sorted(pairs.items(), key=lambda kv: -kv[1])[:3])
+            parts.append(f"{reason}: {total} ({top})")
+    add_log("INFO", "futures_skips", f"Entry skips (last {SKIP_LOG_INTERVAL_SECONDS}s) -> " + " | ".join(parts))
+    _SKIP_STATS.clear()
+    _LAST_SKIP_LOG = time.time()
+
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -59,31 +95,49 @@ def calculate_futures_macro_trend() -> str:
         return "BEARISH"
     return "NEUTRAL"
 
+def _seconds_since(iso_str: str) -> float:
+    dt = datetime.fromisoformat(iso_str)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - dt).total_seconds()
+
 def is_account_on_futures_cooldown(account_id: str, mode: str) -> tuple[bool, int]:
-    """Prevents spam-opening trades by enforcing a strict time-based window."""
+    """Spacing between ANY two entries. Uses the newest trade regardless of status, so
+    long-running open runners can no longer hide a trade that just opened/closed."""
     last_trade = execute_query(
-        "SELECT opened_at FROM futures_trades WHERE account_id = ? AND trade_mode = ? AND status = 'OPEN' ORDER BY id DESC LIMIT 1",
+        "SELECT opened_at FROM futures_trades WHERE account_id = ? AND trade_mode = ? ORDER BY id DESC LIMIT 1",
         (account_id, mode), fetch_one=True
     )
     if not last_trade:
-        last_trade = execute_query(
-            "SELECT opened_at FROM futures_trades WHERE account_id = ? AND trade_mode = ? ORDER BY id DESC LIMIT 1",
-            (account_id, mode), fetch_one=True
-        )
-    if not last_trade:
         return False, 0
-
     try:
-        last_dt = datetime.fromisoformat(last_trade["opened_at"])
-        if last_dt.tzinfo is None:
-            last_dt = last_dt.replace(tzinfo=timezone.utc)
-            
-        elapsed_seconds = (datetime.now(timezone.utc) - last_dt).total_seconds()
-        if elapsed_seconds < FUTURES_ENTRY_COOLDOWN_SECONDS:
-            return True, int(FUTURES_ENTRY_COOLDOWN_SECONDS - elapsed_seconds)
-    except Exception:
-        pass
+        elapsed = _seconds_since(last_trade["opened_at"])
+        if elapsed < FUTURES_ENTRY_COOLDOWN_SECONDS:
+            return True, int(FUTURES_ENTRY_COOLDOWN_SECONDS - elapsed)
+    except Exception as e:
+        add_log("WARNING", "futures_engine", f"Cooldown check could not parse opened_at: {e}")
     return False, 0
+
+def is_pair_on_cooldown(account_id: str, pair: str, mode: str) -> tuple[bool, int, str]:
+    """Blocks re-entering the same pair right after it closed. A structural stop-out
+    blocks it for longer (PAIR_STOP_COOLDOWN_SECONDS) than any other close."""
+    row = execute_query(
+        """SELECT closed_at, close_type FROM futures_trades
+           WHERE account_id = ? AND trade_mode = ? AND pair = ? AND status = 'CLOSED'
+           ORDER BY id DESC LIMIT 1""",
+        (account_id, mode, pair), fetch_one=True
+    )
+    if not row or not row.get("closed_at"):
+        return False, 0, ""
+    close_type = str(row.get("close_type") or "")
+    window = PAIR_STOP_COOLDOWN_SECONDS if close_type.startswith("STRUCTURAL SL") else PAIR_CLOSE_COOLDOWN_SECONDS
+    try:
+        elapsed = _seconds_since(row["closed_at"])
+        if elapsed < window:
+            return True, int(window - elapsed), close_type
+    except Exception as e:
+        add_log("WARNING", "futures_engine", f"Pair cooldown could not parse closed_at for {pair}: {e}")
+    return False, 0, ""
 
 def get_dynamic_margin(available_margin: float, atr: float, current_price: float) -> float:
     """
@@ -106,37 +160,54 @@ def get_dynamic_margin(available_margin: float, atr: float, current_price: float
 
 def check_micro_structure(pair: str, current_price: float, direction: str) -> tuple[bool, str, float]:
     """
-    SMC Snipe Integration for Futures. 
-    Requires price to tap an active Order Block or FVG matching the trend direction.
-    Returns: (is_valid, reason, ob_edge_price)
+    SMC Snipe Integration for Futures.
+    Requires price to be inside an active Order Block / FVG that matches the trade direction
+    (LONG -> BULLISH zone, SHORT -> BEARISH zone, as stored by smart_money_concepts.py).
+    Among matching zones the NARROWEST is tried first, and a zone is only accepted if its
+    stop distance is inside [MIN_STOP_PCT, MAX_STOP_PCT].
+    Returns: (is_valid, reason, ob_edge_price). On failure `reason` is a short skip code.
     """
+    zone_dir = "BULLISH" if direction == "LONG" else "BEARISH"
     try:
+        buffer = current_price * 0.002
         pools = execute_query(
             """
-            SELECT pool_type, top_price, bottom_price 
-            FROM liquidity_pools 
+            SELECT pool_type, top_price, bottom_price
+            FROM liquidity_pools
             WHERE pair = ? AND direction = ? AND status IN ('PENDING', 'MITIGATED')
-            ORDER BY created_at DESC LIMIT 3
-            """, (pair, "BULLISH" if direction == "LONG" else "BEARISH"), fetch_all=True
+              AND bottom_price <= ? AND top_price >= ?
+            ORDER BY (top_price - bottom_price) ASC LIMIT 10
+            """, (pair, zone_dir, current_price + buffer, current_price - buffer), fetch_all=True
         )
-        
         if not pools:
-            return False, "No active SMC Zones found.", 0.0
+            return False, "no_zone_at_price", 0.0
 
+        failures = set()
         for pool in pools:
-            top = pool["top_price"]
-            bottom = pool["bottom_price"]
-            
-            buffer = current_price * 0.002 
-            
-            if (bottom - buffer) <= current_price <= (top + buffer):
-                # The structural invalidation line changes based on direction
-                edge = bottom if direction == "LONG" else top
-                return True, f"Price mitigated {pool['pool_type']} ({direction})", edge
-                
-        return False, "Price outside active SMC zones.", 0.0
+            top, bottom = float(pool["top_price"]), float(pool["bottom_price"])
+            edge = bottom if direction == "LONG" else top
+
+            # Price already beyond the invalidation line
+            if (direction == "LONG" and current_price < edge) or (direction == "SHORT" and current_price > edge):
+                failures.add("price_beyond_edge")
+                continue
+
+            stop_pct = abs(current_price - edge) / current_price * 100.0
+            if stop_pct < MIN_STOP_PCT:
+                failures.add("stop_too_tight")
+                continue
+            if stop_pct > MAX_STOP_PCT:
+                failures.add("stop_too_wide")
+                continue
+
+            return True, f"Price mitigated {pool['pool_type']} ({direction}) | stop {stop_pct:.2f}%", edge
+
+        for code in ("stop_too_wide", "stop_too_tight", "price_beyond_edge"):
+            if code in failures:
+                return False, code, 0.0
+        return False, "no_zone_at_price", 0.0
     except Exception as e:
-        return False, f"Database error: {e}", 0.0
+        return False, f"db_error: {e}", 0.0
 
 
 # =============================================================================
@@ -262,7 +333,7 @@ def run_futures_engine_tick() -> str:
                 elif tp1_hit:
                     trail_trigger = watermark_price * (1 - (FUTURES_CONFIG["trailing_buffer_pct"] / 100.0))
                     if current_price <= trail_trigger and current_price > entry_price:
-                        close_reason, margin_to_close, full_close = f"TRAILING SL HIT (-3% from peak ${watermark_price:.4f})", rem_margin, True
+                        close_reason, margin_to_close, full_close = f"TRAILING SL HIT (-{FUTURES_CONFIG['trailing_buffer_pct']:g}% from peak ${watermark_price:.4f})", rem_margin, True
             
             # Short Logic
             else:
@@ -279,7 +350,7 @@ def run_futures_engine_tick() -> str:
                 elif tp1_hit:
                     trail_trigger = watermark_price * (1 + (FUTURES_CONFIG["trailing_buffer_pct"] / 100.0))
                     if current_price >= trail_trigger and current_price < entry_price:
-                        close_reason, margin_to_close, full_close = f"TRAILING SL HIT (+3% from peak ${watermark_price:.4f})", rem_margin, True
+                        close_reason, margin_to_close, full_close = f"TRAILING SL HIT (+{FUTURES_CONFIG['trailing_buffer_pct']:g}% from peak ${watermark_price:.4f})", rem_margin, True
 
 
             # --- EXECUTE APPLICABLE EXIT PROTOCOL ---
@@ -344,8 +415,9 @@ def run_futures_engine_tick() -> str:
         SELECT pair, last_price, change_24h_pct, oi_spot_ratio, atr 
         FROM trading_pairs 
         WHERE status = 'ACTIVE' AND futures_supported = 1 AND last_price > 0
+          AND volume_24h_usd >= ?
         ORDER BY volume_24h_usd DESC
-        """, fetch_all=True
+        """, (MIN_VOLUME_24H_USD,), fetch_all=True
     )
     if not pairs: return "Execution halted: No valid pairs in database."
 
@@ -359,6 +431,8 @@ def run_futures_engine_tick() -> str:
     if not gate_override:
         allowed, gate_reason = is_trading_allowed_by_btc_gate()
         if not allowed:
+            _note_skip("btc_gate_block", "-")
+            _flush_skip_log()
             return " | ".join(activity_summary) if activity_summary else f"Futures paused: BTC Gate BLOCK ({gate_reason})"
 
     for acct in accounts:
@@ -367,16 +441,22 @@ def run_futures_engine_tick() -> str:
         balance = float(fresh_acct["futures_balance_usdt"] or 0.0)
         available_margin = min(balance, float(fresh_acct.get("futures_capital_cap") or 999999.0))
 
-        if available_margin < FUTURES_CONFIG["min_margin_usdt"]: continue
+        if available_margin < FUTURES_CONFIG["min_margin_usdt"]:
+            _note_skip("low_margin", "-")
+            continue
             
         on_cooldown, _ = is_account_on_futures_cooldown(acct_id, CURRENT_MODE)
-        if on_cooldown: continue
+        if on_cooldown:
+            _note_skip("account_cooldown", "-")
+            continue
 
         open_positions = execute_query(
             "SELECT pair FROM futures_trades WHERE account_id = ? AND status = 'OPEN' AND trade_mode = ?",
             (acct_id, CURRENT_MODE), fetch_all=True
         )
-        if len(open_positions) >= FUTURES_CONFIG["max_open_positions"]: continue
+        if len(open_positions) >= FUTURES_CONFIG["max_open_positions"]:
+            _note_skip("max_positions", "-")
+            continue
         held_pairs = {p["pair"] for p in open_positions}
 
         for p_info in pairs:
@@ -401,10 +481,18 @@ def run_futures_engine_tick() -> str:
 
             # --- LAYER 3: SMC ORDER BLOCK TRIGGER ---
             passed_smc, smc_reason, ob_edge_price = check_micro_structure(pair, current_price, target_direction)
-            if not passed_smc: continue
+            if not passed_smc:
+                _note_skip(smc_reason.split(":")[0], pair)
+                continue
+
+            on_pair_cd, pair_cd_left, last_close = is_pair_on_cooldown(acct_id, pair, CURRENT_MODE)
+            if on_pair_cd:
+                _note_skip("pair_cooldown", pair)
+                continue
 
             # Validate entry isn't already past invalidation
             if (target_direction == "LONG" and current_price < ob_edge_price) or (target_direction == "SHORT" and current_price > ob_edge_price):
+                _note_skip("price_beyond_edge", pair)
                 continue
                 
             entry_reason = f"SMC Zone: {smc_reason} | Macro: {btc_trend}"
@@ -420,10 +508,15 @@ def run_futures_engine_tick() -> str:
 
 
             # --- LAYER 5: DYNAMIC RISK ALLOCATION ---
-            target_margin_usdt = get_dynamic_margin(available_margin, atr, current_price)
-            margin_usdt = max(FUTURES_CONFIG["min_margin_usdt"], min(target_margin_usdt, available_margin))
-            
+            # Size the position so that hitting the stop loses about RISK_PER_TRADE_USDT,
+            # whatever the stop distance:  margin = risk / (leverage * stop_fraction)
+            stop_fraction = risk_distance / current_price
+            margin_by_risk = RISK_PER_TRADE_USDT / (FUTURES_CONFIG["leverage"] * stop_fraction)
+            max_margin = available_margin * (MAX_MARGIN_PCT_PER_TRADE / 100.0)
+            margin_usdt = max(FUTURES_CONFIG["min_margin_usdt"], min(margin_by_risk, max_margin, available_margin))
+
             notional_value = margin_usdt * FUTURES_CONFIG["leverage"]
+            entry_fee = notional_value * (FUTURES_CONFIG["fee_pct"] / 100.0)
             
             if not is_paper:
                 try:
@@ -447,19 +540,20 @@ def run_futures_engine_tick() -> str:
                 INSERT INTO futures_trades (
                     account_id, pair, trade_mode, direction, status, entry_price, 
                     margin_usdt, remaining_margin_usdt, notional_usdt, leverage,
-                    ob_edge_price, current_sl, dynamic_tp1, watermark_price, opened_at
-                ) VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ob_edge_price, current_sl, dynamic_tp1, watermark_price, opened_at, pnl_usdt
+                ) VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (acct_id, pair, CURRENT_MODE, target_direction, current_price, margin_usdt, margin_usdt, notional_value, FUTURES_CONFIG["leverage"], 
-                 ob_edge_price, ob_edge_price, dynamic_tp1, current_price, now_str), 
+                 ob_edge_price, ob_edge_price, dynamic_tp1, current_price, now_str, -entry_fee), 
                 commit=True
             )
             
-            execute_query("UPDATE accounts SET futures_balance_usdt = ? WHERE account_id = ?", (balance - margin_usdt, acct_id), commit=True)
+            execute_query("UPDATE accounts SET futures_balance_usdt = ? WHERE account_id = ?", (balance - margin_usdt - entry_fee, acct_id), commit=True)
             
-            msg = f"[{fresh_acct['display_name']}] {CURRENT_MODE} ENTRY: {target_direction} on {pair} at ${current_price:,.4f} (Margin: ${margin_usdt:.2f} @ {FUTURES_CONFIG['leverage']}x)\n🎯 Risk/Reward Locked: SL @ ${ob_edge_price:.4f} | TP1 @ ${dynamic_tp1:.4f}\n🧠 Trigger: {entry_reason}"
+            msg = f"[{fresh_acct['display_name']}] {CURRENT_MODE} ENTRY: {target_direction} on {pair} at ${current_price:,.4f} (Margin: ${margin_usdt:.2f} @ {FUTURES_CONFIG['leverage']}x | Risk ~${margin_usdt * FUTURES_CONFIG['leverage'] * stop_fraction:.2f} | Entry fee ${entry_fee:.3f})\n🎯 Risk/Reward Locked: SL @ ${ob_edge_price:.4f} ({stop_fraction*100:.2f}% away) | TP1 @ ${dynamic_tp1:.4f}\n🧠 Trigger: {entry_reason}"
             add_log("INFO", "apextick_bot", msg)
             activity_summary.append(msg)
             break 
 
+    _flush_skip_log()
     return " | ".join(activity_summary) if activity_summary else "Futures Engine: Monitoring SMC Pools."

@@ -58,19 +58,25 @@ SPOT_CONFIG = {
 
 # --- USDT-M FUTURES TRADING ENGINE CONFIGURATION (The Sniper) ---
 FUTURES_CONFIG = {
-    "capital_cap_usdt": 150.0,       # Base capital limit
+    "capital_cap_usdt": 150.0,
     "leverage": 15,
-    "margin_size_pct": 2.0,          # 2% of $150 = $3.00 margin per position base (modified by ATR)
-    "min_margin_usdt": 0.4,          
-    "max_open_positions": 5,         
-    "fee_pct": 0.05,                 
-    "withdraw_split_pct": 0.70,      
-    
-    # NEW: 75/25 Dynamic SMC Sniper Execution
-    "tp1_close_ratio": 0.75,         # Secure 75% of margin at TP1. Triggers Breakeven Switch.
-    "runner_close_ratio": 1.0,       # Market close the remaining 25% on trailing stop
-    "risk_reward_multiplier": 3.0,   # Dynamic Target: TP1 is placed 3x the distance of the Structural SL
-    "trailing_buffer_pct": 3.0,      # The 25% runner trails the absolute peak watermark by 3%
+    "margin_size_pct": 2.0,          # legacy, no longer used for entries
+    "min_margin_usdt": 0.4,
+    "max_open_positions": 5,
+    "fee_pct": 0.05,
+    "withdraw_split_pct": 0.70,
+    "tp1_close_ratio": 0.75,
+    "runner_close_ratio": 1.0,
+    "risk_reward_multiplier": 2.0,
+    "trailing_buffer_pct": 1.5,
+    "min_stop_pct": 0.4,
+    "max_stop_pct": 2.0,
+    "risk_per_trade_usdt": 0.50,
+    "max_margin_pct_per_trade": 5.0,
+    "pair_stop_cooldown_seconds": 7200,
+    "pair_close_cooldown_seconds": 1800,
+    "min_volume_24h_usd": 20_000_000,
+    "skip_log_interval_seconds": 300,
 }
 
 # --- DYNAMIC RISK MANAGEMENT (ATR SIZING) ---
