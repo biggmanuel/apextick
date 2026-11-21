@@ -262,8 +262,17 @@ def api_status():
 
     btc_regime_row = execute_query("SELECT regime FROM market_regimes WHERE pair = 'BTC/USDT'", fetch_one=True)
 
+    override_row = execute_query("SELECT value FROM bot_settings WHERE key = 'btc_gate_override'", fetch_one=True)
+    gate_override = bool(override_row and str(override_row["value"]).strip() == "1")
+
+    prices_ts = float(MARKET_STATE.get("prices_ts") or 0.0)
+    prices_age = (time.time() - prices_ts) if prices_ts > 0 else None
+
     allowed, gate_reason = is_trading_allowed_by_btc_gate()
     return jsonify({
+        "btc_gate_override": gate_override,
+        "macro_halt": is_halted,
+        "prices_age_seconds": round(prices_age, 1) if prices_age is not None else None,
         "status": "HALTED" if is_halted else "RUNNING",
         "api_ok": True,
         "btc_gate_allowed": allowed,
@@ -413,7 +422,7 @@ def api_positions():
             "id": t["id"], "type": "futures", "pair": pair, "direction": direction,
             "entry": f"${entry:.5f}", "live_price": f"${live_price:.5f}", "size": size,
             "pnl_usdt": total_pnl, "roi_pct": roi_pct, "peak_roi": float(t.get("peak_roi_pct") or 0.0),
-            "banked_usdt": banked, "unrealized_usdt": runner,
+            "banked_usdt": banked, "unrealized_usdt": runner, "leverage": lev,
             "tp1": tp1_hit,
             "current_sl": float(t.get("current_sl") or 0.0),
             "dynamic_tp1": float(t.get("dynamic_tp1") or 0.0),

@@ -74,6 +74,23 @@ q("""INSERT INTO spot_trades (account_id,pair,trade_mode,status,entry_price,qty,
 ss = client.get("/api/statistics").get_json()
 check("spot equity = cash + open value (22)", abs(ss["portfolio_value"] - 122.0) < 0.01 and ss["cash_balance"] == 100.0, str(ss))
 
+# ---------------- the page itself renders through Jinja (skipped if templates/dashboard.html is not there)
+if os.path.exists("templates/dashboard.html"):
+    r = client.get("/")
+    page = r.get_data(as_text=True)
+    check("dashboard page renders (HTTP 200, bot name filled in)", r.status_code == 200 and "{{" not in page and "ApexTick" in page, f"{r.status_code}")
+    check("page ships the confirmation modal and no prompt()/alert() boxes", 'id="modal"' in page and "prompt(" not in page and "alert(" not in page)
+    check("page escapes server data before innerHTML (esc helper present)", "const esc =" in page)
+
+# ---------------- new fields the dashboard page uses
+st = client.get("/api/status").get_json()
+check("status exposes btc_gate_override / macro_halt / prices_age_seconds", {"btc_gate_override", "macro_halt", "prices_age_seconds"} <= set(st), str(sorted(st)))
+check("override flag follows the database switch", st["btc_gate_override"] is False)
+client.post("/api/toggle-btc-gate", json={"override": True}, headers=H)
+check("override flag turns on after the toggle", client.get("/api/status").get_json()["btc_gate_override"] is True)
+client.post("/api/toggle-btc-gate", json={"override": "0"}, headers=H)
+check("futures positions carry numeric leverage", pos["leverage"] == 15, str(pos.get("leverage")))
+
 # ---------------- force close: futures with banked TP1
 cash0 = fut_cash()
 equity_before = cash0 + 0.7 + runner
