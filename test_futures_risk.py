@@ -8,6 +8,10 @@ sys.path.insert(0, os.getcwd())
 import database as D
 D.init_db()
 import futures_engine as F
+F.PAPER_SLIPPAGE_PCT = 0.0
+import time as _t
+from btc_decline_signal import MARKET_STATE as _MS
+_MS["prices_ts"] = _t.time() + 10**9   # fixture prices count as always fresh
 from btc_decline_signal import MARKET_STATE
 
 q = D.execute_query

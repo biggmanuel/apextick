@@ -54,29 +54,40 @@ SPOT_CONFIG = {
     "risk_reward_multiplier": 3.0,   # Dynamic Target: TP1 is placed 3x the distance of the Structural SL
     "trailing_buffer_pct": 3.0,      # The 25% runner trails the absolute peak watermark by 3%
     "never_close_below_tp": True,    # Forces reliance on exact Demand Zone entries
+
+    # --- NEW: spot risk controls ---
+    "min_tp_pct": 1.2,               # TP is never closer than 1.2% (a 0.2% round-trip fee eats tiny targets)
+    "max_drawdown_pct": 12.0,        # Sell a bag that is 12% under water (0 = never, the old accumulator behaviour)
+    "pair_cooldown_after_loss_seconds": 14400,  # After a losing close, do not re-buy that coin for 4h
+    "skip_log_interval_seconds": 300,
 }
 
 # --- USDT-M FUTURES TRADING ENGINE CONFIGURATION (The Sniper) ---
 FUTURES_CONFIG = {
-    "capital_cap_usdt": 150.0,
+    "capital_cap_usdt": 150.0,       # Base capital limit
     "leverage": 15,
-    "margin_size_pct": 2.0,          # legacy, no longer used for entries
+    "margin_size_pct": 2.0,          # (legacy) fixed-margin sizing, no longer used for entries
     "min_margin_usdt": 0.4,
     "max_open_positions": 5,
     "fee_pct": 0.05,
     "withdraw_split_pct": 0.70,
-    "tp1_close_ratio": 0.75,
+
+    # 75/25 Dynamic SMC Sniper Execution
+    "tp1_close_ratio": 0.75,         # Secure 75% of margin at TP1. Triggers Breakeven Switch.
     "runner_close_ratio": 1.0,
-    "risk_reward_multiplier": 2.0,
-    "trailing_buffer_pct": 1.5,
-    "min_stop_pct": 0.4,
-    "max_stop_pct": 2.0,
-    "risk_per_trade_usdt": 0.50,
-    "max_margin_pct_per_trade": 5.0,
-    "pair_stop_cooldown_seconds": 7200,
-    "pair_close_cooldown_seconds": 1800,
-    "min_volume_24h_usd": 20_000_000,
-    "skip_log_interval_seconds": 300,
+    "risk_reward_multiplier": 2.0,   # TP1 = 2x the stop distance (was 3.0 - too far away, ~1 in 5 hit it)
+    "trailing_buffer_pct": 1.5,      # Runner trails the peak by 1.5% (was 3.0 = ~45% of margin at 15x)
+
+    # --- NEW: risk controls ---
+    "min_stop_pct": 0.4,             # Skip trades whose stop is closer than this (noise stop-outs, pennies of profit)
+    "max_stop_pct": 2.0,             # Skip trades whose stop is further than this (at 15x, 2% = 30% of margin)
+    "risk_per_trade_usdt": 0.50,     # Target loss if the stop is hit; margin is sized from this
+    "max_margin_pct_per_trade": 5.0, # Never put more than 5% of balance into one trade's margin
+    "pair_stop_cooldown_seconds": 7200,   # After a stop-out, don't re-enter that pair for 2h
+    "pair_close_cooldown_seconds": 1800,  # After any other close, wait 30 min on that pair
+    "min_volume_24h_usd": 20_000_000,     # Skip thin coins (BREV/MMT-style gaps)
+    "skip_log_interval_seconds": 300,     # One "why entries were skipped" summary per 5 min
+    "paper_slippage_pct": 0.02,           # Paper fills are 0.02% worse than the quote (entry and every exit)
 }
 
 # --- DYNAMIC RISK MANAGEMENT (ATR SIZING) ---
@@ -100,6 +111,9 @@ SMC_CONFIG = {
     "lookback_candles": 40,          # Rolling array size for structural mapping
     "min_fvg_pct_gap": 0.2,          # Minimum size required to register a Fair Value Gap
     "ob_mitigation_buffer": 0.1,     # Tolerance % for price hitting an Order Block
+    "max_ob_lookback_candles": 10,   # Order Block must be within 10 candles of the impulse
+    "zone_max_age_hours": 24,        # Zones older than this expire
+    "prune_after_hours": 48,         # Dead zones are deleted after this long
 }
 
 # --- MACRO CALENDAR (The NLP Kill-Switch) ---
@@ -107,6 +121,9 @@ MACRO_CALENDAR_CONFIG = {
     "enabled": True,
     "flatten_before_minutes": 5,     # Market-sell all positions 5 minutes before high-impact news
     "resume_after_minutes": 15,      # Keep execution engines paused until 15 minutes after news
+    # Used when the Finnhub calendar is unavailable (it is a paid endpoint). Format: "YYYY-MM-DD HH:MM|Name" in UTC.
+    # You can also set MACRO_MANUAL_EVENTS in .env, separated by semicolons.
+    "manual_events": [],
 }
 
 # --- BTC MACRO GATE SETTINGS (The 1H Trend Bias) ---
@@ -141,5 +158,8 @@ MARKET_SCANNER_CONFIG = {
     "min_momentum_pct": 1.5,             
     "max_overextended_pct": 25.0,        
     "vwap_tolerance_pct": 100.0,         # Wide for testing, restricted by SMC engine
-    "volume_spike_multiplier": 0.0,      
+    "volume_spike_multiplier": 0.0,
+
+    # Tokenized stocks / equity tokens (market hours, gaps, thin books). Add more tickers here.
+    "excluded_bases": ["SPCXB", "SOXLB", "NVDAB", "QQQB", "INTCB", "KORUB", "MUB", "SNXXB"],
 }

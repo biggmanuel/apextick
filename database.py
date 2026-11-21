@@ -29,6 +29,8 @@ def get_connection():
         conn.row_factory = sqlite3.Row
         # Enable concurrent read/writes to stop "database is locked" errors
         conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")   # safe with WAL, far fewer fsyncs
+        conn.execute("PRAGMA busy_timeout=20000;")   # wait up to 20s for a lock instead of failing
         return conn
 
 def execute_query(query: str, params: tuple = (), fetch_one: bool = False, fetch_all: bool = False, commit: bool = False):
@@ -55,6 +57,35 @@ def execute_query(query: str, params: tuple = (), fetch_one: bool = False, fetch
         return result
     finally:
         conn.close()
+
+def execute_batch(statements) -> int:
+    """
+    Runs many (query, params) statements in ONE connection and ONE commit.
+    Use it instead of hundreds of execute_query(..., commit=True) calls: far fewer locks.
+    Returns the number of rows actually changed.
+    """
+    if not statements:
+        return 0
+    conn = get_connection()
+    changed = 0
+    try:
+        cursor = conn.cursor()
+        for query, params in statements:
+            if IS_POSTGRES:
+                query = query.replace("?", "%s")
+            cursor.execute(query, params)
+            if cursor.rowcount and cursor.rowcount > 0:
+                changed += cursor.rowcount
+        conn.commit()
+        return changed
+    finally:
+        conn.close()
+
+def prune_logs(keep_days: int = 7):
+    """Deletes log rows older than keep_days so the logs table does not grow forever."""
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat()
+    execute_query("DELETE FROM logs WHERE timestamp < ?", (cutoff,), commit=True)
 
 def init_db():
     """
@@ -184,6 +215,26 @@ def init_db():
             except Exception:
                 pass # Column already exists, proceed normally
 
+    # --- DYNAMIC MIGRATION: sniper columns for databases created before the 75/25 upgrade ---
+    sniper_columns = {
+        "ob_edge_price": "REAL DEFAULT 0.0",
+        "current_sl": "REAL DEFAULT 0.0",
+        "dynamic_tp1": "REAL DEFAULT 0.0",
+        "watermark_price": "REAL DEFAULT 0.0",
+    }
+    extra_columns = {
+        "spot_trades": {"remaining_qty": "REAL DEFAULT 0.0"},
+        "futures_trades": {"remaining_margin_usdt": "REAL DEFAULT 0.0", "peak_roi_pct": "REAL DEFAULT 0.0", "worst_roi_pct": "REAL DEFAULT 0.0"},
+    }
+    for table in ["spot_trades", "futures_trades"]:
+        wanted = dict(sniper_columns)
+        wanted.update(extra_columns.get(table, {}))
+        for col, col_type in wanted.items():
+            try:
+                execute_query(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}", commit=True)
+            except Exception:
+                pass  # Column already exists, proceed normally
+
     # 5. System Logs
     execute_query(f"""
         CREATE TABLE IF NOT EXISTS logs (
@@ -231,6 +282,17 @@ def init_db():
     """, commit=True)
 
 
+    # --- INDEXES (the engines query these tables every 3 seconds) ---
+    for stmt in (
+        "CREATE INDEX IF NOT EXISTS ix_futures_acct_mode_status ON futures_trades (account_id, trade_mode, status)",
+        "CREATE INDEX IF NOT EXISTS ix_futures_pair_status ON futures_trades (pair, status)",
+        "CREATE INDEX IF NOT EXISTS ix_spot_acct_mode_status ON spot_trades (account_id, trade_mode, status)",
+        "CREATE INDEX IF NOT EXISTS ix_spot_pair_status ON spot_trades (pair, status)",
+        "CREATE INDEX IF NOT EXISTS ix_pairs_status ON trading_pairs (status)",
+        "CREATE INDEX IF NOT EXISTS ix_logs_timestamp ON logs (timestamp)",
+    ):
+        execute_query(stmt, commit=True)
+
     # --- SEED DEFAULT DATA ---
     now_str = datetime.now(timezone.utc).isoformat()
     
@@ -248,11 +310,12 @@ def init_db():
     # Pre-Seed the God-Mode Dashboard Toggles
     default_settings = [
         ('paper_trading_enabled', '1'),
-        ('btc_gate_override', '0')
+        ('btc_gate_override', '0'),
+        ('macro_halt', '0')
     ]
     for key, val in default_settings:
         execute_query(
-            "INSERT OR IGNORE INTO bot_settings (key, value, updated_at) VALUES (?, ?, ?)",
+            "INSERT INTO bot_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT (key) DO NOTHING",
             (key, val, now_str),
             commit=True
         )
