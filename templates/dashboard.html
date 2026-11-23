@@ -390,6 +390,7 @@
                     <tr>
                         <th>Date/Time</th>
                         <th>Pair</th>
+                        <th>Type</th>
                         <th>Exit Type</th>
                         <th>Realized PnL</th>
                         <th>PnL %</th>
@@ -723,8 +724,8 @@
         const rows = positions.map((p) => {
             const pnl = num(p.pnl_usdt);
             const isFut = p.type === 'futures';
-            const entry = num(String(p.entry).replace(/[^0-9.\-]+/g, ''));
-            const live = num(String(p.live_price).replace(/[^0-9.\-]+/g, ''));
+            const entry = num(p.entry_raw, num(String(p.entry).replace(/[^0-9.\-]+/g, '')));
+            const live = num(p.live_raw, num(String(p.live_price).replace(/[^0-9.\-]+/g, '')));
             const sl = num(p.current_sl), tp = num(p.dynamic_tp1);
             const lev = num(p.leverage, num((String(p.size).match(/\((\d+)x\)/) || [])[1]));
             const tagClass = p.direction === 'LONG' ? 'long' : (p.direction === 'SHORT' ? 'short' : 'spot');
@@ -782,13 +783,20 @@
         tbody.innerHTML = rows.join('');
     }
 
-    function historyRow(h, pnlPct, middleCell) {
+    function directionCell(direction) {
+        const d = String(direction || '').toUpperCase();
+        const cls = d === 'LONG' ? 'long' : (d === 'SHORT' ? 'short' : 'spot');
+        return '<td><span class="tag ' + cls + '">' + esc(d || '?') + '</span></td>';
+    }
+
+    function historyRow(h, pnlPct, middleCell, typeCell) {
         const pnl = num(h.realized_pnl);
         const up = pnl >= 0;
         const cls = up ? 'text-profit' : 'text-loss';
         return '<tr>' +
             '<td class="font-mono" style="font-size:0.75rem; color:var(--text-muted);">' + safeFormatTime(h.closed_at) + '</td>' +
             '<td style="font-weight: 700;">' + esc(h.pair) + '</td>' +
+            (typeCell || '') +
             middleCell +
             '<td class="' + cls + ' font-mono">' + (up ? '+' : '-') + '$' + Math.abs(pnl).toFixed(2) + '</td>' +
             '<td class="' + cls + ' font-mono" style="font-size:0.8rem;">' + (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(2) + '%</td>' +
@@ -800,8 +808,9 @@
         const spot = hist.spot_trades || [];
         $('futures-history-tbody').innerHTML = fut.length ? fut.map((h) =>
             historyRow(h, num(h.pnl_pct != null ? h.pnl_pct : h.profit_pct),
-                '<td class="font-mono" style="font-size:0.75rem;">' + esc(h.close_type || 'UNKNOWN') + '</td>')).join('') :
-            '<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">No closed futures trades yet.</td></tr>';
+                '<td class="font-mono" style="font-size:0.75rem;">' + esc(h.close_type || 'UNKNOWN') + '</td>',
+                directionCell(h.direction))).join('') :
+            '<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">No closed futures trades yet.</td></tr>';
         $('spot-history-tbody').innerHTML = spot.length ? spot.map((h) =>
             historyRow(h, num(h.profit_pct != null ? h.profit_pct : h.pnl_pct),
                 '<td class="font-mono">$' + formatPrice(h.exit_price) + '</td>')).join('') :
@@ -833,7 +842,8 @@
         const el = $('data-status');
         if (!el) return;
         const age = lastOk ? (Date.now() - lastOk) / 1000 : Infinity;
-        if (age > 10) { el.textContent = 'DASHBOARD OFFLINE'; el.className = 'badge offline'; }
+        if (document.hidden) { el.textContent = 'PAUSED - TAB HIDDEN'; el.className = 'badge stale'; }
+        else if (age > 10) { el.textContent = 'DASHBOARD OFFLINE'; el.className = 'badge offline'; }
         else if (lastPricesAge !== null && lastPricesAge > 20) { el.textContent = 'PRICES STALE ' + Math.round(lastPricesAge) + 's'; el.className = 'badge stale'; }
         else { el.textContent = 'UPDATED ' + new Date(lastOk).toLocaleTimeString(); el.className = 'badge online'; }
     }
@@ -877,6 +887,7 @@
 
     async function loop() {
         if (!document.hidden) await fetchData(false);
+        updateDataBadge();
         setTimeout(loop, 3000);
     }
     document.addEventListener('visibilitychange', () => { if (!document.hidden) fetchData(true); });

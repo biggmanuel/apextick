@@ -402,6 +402,7 @@ def api_positions():
         positions.append({
             "id": t["id"], "type": "spot", "pair": pair, "direction": "SPOT",
             "entry": f"${entry:.5f}", "live_price": f"${live_price:.5f}", "size": f"${(qty * live_price):.2f}",
+            "entry_raw": entry, "live_raw": live_price,
             "pnl_usdt": pnl, "roi_pct": roi_pct, "tp1": bool(t["tp1_hit"]),
             "current_sl": float(t.get("current_sl") or 0.0),
             "dynamic_tp1": float(t.get("dynamic_tp1") or 0.0),
@@ -421,6 +422,7 @@ def api_positions():
         positions.append({
             "id": t["id"], "type": "futures", "pair": pair, "direction": direction,
             "entry": f"${entry:.5f}", "live_price": f"${live_price:.5f}", "size": size,
+            "entry_raw": entry, "live_raw": live_price,
             "pnl_usdt": total_pnl, "roi_pct": roi_pct, "peak_roi": float(t.get("peak_roi_pct") or 0.0),
             "banked_usdt": banked, "unrealized_usdt": runner, "leverage": lev,
             "tp1": tp1_hit,
@@ -524,7 +526,7 @@ def api_trades():
     current_mode = get_trade_mode()
 
     fut_exits = execute_query("""
-        SELECT pair, 'FUTURES' as type, exit_price, pnl_usdt as realized_pnl, close_type, pnl_pct, closed_at
+        SELECT pair, 'FUTURES' as type, direction, exit_price, pnl_usdt as realized_pnl, close_type, pnl_pct, closed_at
         FROM futures_trades
         WHERE status = 'CLOSED' AND trade_mode = ?
         ORDER BY closed_at DESC LIMIT 50
