@@ -43,7 +43,7 @@ Each package lists the files, the change, and the acceptance criteria. Numeric v
 - Replace the single `max_drawdown_pct` check with a **stop price** written to `current_sl` at entry: `current_sl = entry * (1 - stop_pct / 100)`.
 - Add a **dollar cap on each loss**, `max_loss_usdt` (proposed `0.75`), so `stop_pct` is never wider than `max_loss_usdt / trade_usdt`.
 - Enforce a **minimum reward-to-risk** ratio: `dynamic_tp1 >= entry * (1 + min_rr * stop_pct / 100)`, with `min_rr` proposed at `1.5`.
-- Add `max_tp_pct` (proposed `8.0`) so targets like ACE's `+62.84%` no longer lock a slot for days.
+- Add `max_tp_pct` (proposed `8.0`) so targets like ACE's `+62.84%` no longer lock a slot until they hit or the bag is stopped out.
 - Exit when `current_price <= current_sl` (not a percentage check), and keep the `MACRO HALT` flatten.
 - Add `AND status = 'OPEN'` to the exit `UPDATE` and only credit the account when `rowcount == 1` (handover Bug 5).
 - Decide whether to apply the new stop to the five currently open Spot bags (see open questions).
