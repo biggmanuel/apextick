@@ -94,10 +94,11 @@ Break-even win rate at a -4% stop and +6% target is 40%. At a -4% stop and +3% t
 - `min_stop_pct` raised to `0.65` (from `0.4`).
 - Engine exit `UPDATE` statements get the same `AND status = 'OPEN'` guard as WP1.
 - `self_awareness.py` implements:
-  - **Shadow mode:** after 3 consecutive closed losses, new signals are recorded with `trade_mode = 'SHADOW'` and no balance changes.
-  - **Recovery:** a shadow trade reaching TP1 returns the engine to normal mode.
-  - **Directional audit:** the last 3 closed trades in a direction are checked before opening that direction again.
-  - **Risk throttle:** risk drops from `$0.50` to `$0.25` and same-direction slots drop from 2 to 1 after 2 consecutive losses.
+  - **Shadow mode:** after `shadow_trigger_losses` consecutive closed losses (proposed `5`, not `3`), new signals are recorded with `trade_mode = 'SHADOW'` and no balance changes.
+  - **Recovery:** a shadow trade reaching TP1 returns the engine to normal mode. Shadow trades also close on their stop and expire after a set number of candles (see Open Questions).
+  - **Directional audit:** after `direction_trigger_losses` consecutive same-direction losses (proposed `4`), that direction is blocked for new entries until a shadow trade in that direction reaches TP1.
+  - **Risk throttle:** after `throttle_trigger_losses` consecutive losses (proposed `3`), risk drops from `$0.50` to `$0.25` and same-direction slots drop from 2 to 1.
+  - **Calibration (required before merge):** at the current ~30% win rate, a run of 3 losses occurs about a third of the time and a run of 5 about one time in six. The thresholds above are starting points. Replay the closed-trade history in `analyze_trades.py` and choose thresholds so each mode is active for no more than about 25% of trades. Record the chosen values and the measured active fraction in the PR.
 - Phase 1 of the Futures engine also manages open `SHADOW` positions (watermark, TP1, breakeven, trailing) without touching balances or calling the exchange.
 
 **Acceptance criteria (tests):** margin at a given stop equals the formula; a realized loss is within `$0.50` plus rounding; shadow mode activates after 3 losses and recovers after a shadow TP1; same-direction slot limits hold; shadow positions close without balance changes.
