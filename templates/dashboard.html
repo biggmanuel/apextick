@@ -1,0 +1,899 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ApexTick | Institutional Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-deep: #05080c;
+            --bg-card: rgba(12, 16, 28, 0.85);
+            --bg-card-hover: rgba(18, 24, 43, 0.95);
+            --border-subtle: rgba(0, 212, 255, 0.15);
+            --border-glow: rgba(0, 212, 255, 0.4);
+            --accent-cyan: #00d4ff;
+            --accent-purple: #a855f7;
+            --profit: #00ff88;
+            --loss: #ff4757;
+            --text-primary: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --font-body: 'Inter', sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
+        body {
+            background-color: var(--bg-deep);
+            background-image: 
+                radial-gradient(80% 50% at 50% -20%, rgba(0, 212, 255, 0.08), transparent),
+                radial-gradient(60% 40% at 100% 100%, rgba(168, 85, 247, 0.05), transparent);
+            color: var(--text-primary);
+            font-family: var(--font-body);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container { max-width: 1600px; margin: 0 auto; }
+
+        /* --- HEADER & GOD MODE CONTROLS --- */
+        .header {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+            padding: 20px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+        }
+        .header-title {
+            font-size: 1.5rem;
+            font-weight: 800;
+            background: linear-gradient(90deg, var(--accent-cyan), var(--accent-purple));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: 0.05em;
+        }
+        .status-badges { display: flex; gap: 10px; align-items: center; }
+        .badge {
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+        .badge.online { background: rgba(0, 255, 136, 0.1); color: var(--profit); border: 1px solid var(--profit); box-shadow: 0 0 10px rgba(0,255,136,0.2); }
+        .badge.offline { background: rgba(255, 71, 87, 0.1); color: var(--loss); border: 1px solid var(--loss); }
+
+        .god-mode-controls {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            background: rgba(0,0,0,0.4);
+            padding: 10px 20px;
+            border-radius: 12px;
+            border: 1px solid var(--border-subtle);
+        }
+        .god-mode-controls label {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.8rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+        }
+        .text-warning { color: #fbbf24; }
+
+        /* Switches */
+        .switch { position: relative; display: inline-block; width: 44px; height: 22px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #334155; transition: .4s; border-radius: 24px; }
+        .slider:before { position: absolute; content: ""; height: 14px; width: 14px; left: 4px; bottom: 4px; background-color: white; transition: .4s; border-radius: 50%; }
+        input:checked + .slider { background-color: var(--profit); box-shadow: 0 0 10px var(--profit); }
+        input.danger:checked + .slider { background-color: var(--loss); box-shadow: 0 0 10px var(--loss); }
+        input:checked + .slider:before { transform: translateX(22px); }
+
+        .btn-panic {
+            background: rgba(255, 71, 87, 0.15);
+            color: var(--loss);
+            border: 1px solid var(--loss);
+            padding: 8px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            font-weight: 800;
+            text-transform: uppercase;
+            transition: 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .btn-panic:hover { background: var(--loss); color: #fff; box-shadow: 0 0 15px var(--loss); }
+
+        /* --- KPI GRID --- */
+        .kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .kpi-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+            padding: 20px;
+            position: relative;
+            overflow: hidden;
+            transition: border-color 0.2s, transform 0.2s;
+        }
+        .kpi-card:hover { border-color: var(--border-glow); transform: translateY(-2px); }
+        .kpi-title { font-size: 0.75rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 8px; }
+        .kpi-value { font-size: 1.75rem; font-weight: 700; }
+        .kpi-sub { font-size: 0.8rem; color: var(--text-muted); margin-top: 4px; }
+        
+        .text-profit { color: var(--profit); text-shadow: 0 0 12px rgba(0,255,136,0.3); }
+        .text-loss { color: var(--loss); }
+        .text-cyan { color: var(--accent-cyan); }
+
+        /* --- WIDGET ROW --- */
+        .widget-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .widget {
+            background: linear-gradient(145deg, rgba(12, 16, 28, 0.9), rgba(8, 12, 22, 0.95));
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+        }
+        .widget-header { font-size: 1rem; color: var(--accent-cyan); font-weight: 700; margin-bottom: 16px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px; text-transform: uppercase; }
+        
+        .macro-stats { display: flex; justify-content: space-between; margin-bottom: 12px; font-size: 0.9rem;}
+        .pressure-bar { height: 8px; border-radius: 4px; background: rgba(255,71,87,0.2); display: flex; overflow: hidden; margin-top: 8px; }
+        .pressure-buy { height: 100%; background: var(--profit); transition: width 0.5s; }
+
+        .mini-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+        .mini-table th { color: var(--text-secondary); text-align: left; padding: 6px 0; border-bottom: 1px solid var(--border-subtle); }
+        .mini-table td { padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+
+        /* --- DATA TABLES --- */
+        .table-container {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 24px;
+            overflow-x: auto;
+        }
+        table { width: 100%; border-collapse: collapse; text-align: left; }
+        th { padding: 12px; font-size: 0.7rem; text-transform: uppercase; color: var(--text-secondary); border-bottom: 1px solid var(--border-subtle); }
+        td { padding: 12px; font-size: 0.9rem; border-bottom: 1px solid rgba(255,255,255,0.05); }
+        tr:hover td { background: var(--bg-card-hover); }
+
+        .tag { padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
+        .tag.long { background: rgba(0,255,136,0.1); color: var(--profit); border: 1px solid rgba(0,255,136,0.3); }
+        .tag.short { background: rgba(255,71,87,0.1); color: var(--loss); border: 1px solid rgba(255,71,87,0.3); }
+        .tag.spot { background: rgba(0,212,255,0.1); color: var(--accent-cyan); border: 1px solid rgba(0,212,255,0.3); }
+
+        /* 75/25 SNIPER VISUALS */
+        .sniper-badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 0.65rem; font-weight: 800; border: 1px solid var(--text-muted); color: var(--text-muted); margin-right: 4px; }
+        .sniper-badge.active-secure { border-color: var(--profit); background: rgba(0,255,136,0.15); color: var(--profit); }
+        .sniper-badge.active-breakeven { border-color: var(--accent-cyan); background: rgba(0,212,255,0.15); color: var(--accent-cyan); }
+        .watermark-sub { font-size: 0.7rem; color: var(--text-muted); display: block; margin-top: 2px;}
+
+        .btn-close { background: rgba(255,71,87,0.15); color: var(--loss); border: 1px solid var(--loss); padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 0.75rem; font-weight: 700; transition: 0.2s; }
+        .btn-close:hover { background: var(--loss); color: #fff; box-shadow: 0 0 12px var(--loss); }
+
+        /* --- LOGS --- */
+        .logs-box { background: #000; border: 1px solid var(--border-subtle); border-radius: 12px; padding: 16px; height: 300px; overflow-y: auto; font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.5; }
+        .log-entry { border-bottom: 1px solid rgba(255,255,255,0.05); padding: 4px 0; }
+        .log-time { color: var(--text-muted); margin-right: 10px; }
+        .log-INFO { color: var(--accent-cyan); }
+        .log-SUCCESS { color: var(--profit); }
+        .log-WARNING { color: #fbbf24; }
+        .log-ERROR { color: var(--loss); }
+        .font-mono { font-family: var(--font-mono); }
+
+        /* --- ADDITIONS: banners, modal, toast, risk badges --- */
+        #banners { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+        .banner { padding: 10px 16px; border-radius: 10px; font-size: 0.85rem; font-weight: 700; letter-spacing: 0.03em; border: 1px solid; }
+        .banner.danger { background: rgba(255,71,87,0.12); border-color: var(--loss); color: var(--loss); }
+        .banner.warn { background: rgba(251,191,36,0.10); border-color: #fbbf24; color: #fbbf24; }
+        .banner.info { background: rgba(0,212,255,0.08); border-color: var(--accent-cyan); color: var(--accent-cyan); }
+
+        .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.72); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+        .modal-overlay[hidden] { display: none; }
+        .modal-box { background: #0c101c; border: 1px solid var(--border-glow); border-radius: 14px; padding: 24px; width: min(440px, 92vw); box-shadow: 0 10px 40px rgba(0,0,0,0.7); }
+        .modal-box.danger { border-color: var(--loss); }
+        .modal-title { font-size: 1.1rem; font-weight: 800; margin-bottom: 10px; color: var(--accent-cyan); }
+        .modal-box.danger .modal-title { color: var(--loss); }
+        .modal-text { font-size: 0.85rem; color: var(--text-secondary); line-height: 1.5; margin-bottom: 14px; white-space: pre-line; }
+        .modal-input { width: 100%; padding: 10px 12px; margin-bottom: 10px; background: #05080c; border: 1px solid var(--border-subtle); border-radius: 8px; color: var(--text-primary); font-family: var(--font-mono); font-size: 0.9rem; }
+        .modal-input:focus { outline: none; border-color: var(--accent-cyan); }
+        .modal-input[hidden] { display: none; }
+        .modal-error { min-height: 1.1em; font-size: 0.78rem; color: var(--loss); margin-bottom: 8px; }
+        .modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
+        .modal-actions button { padding: 8px 16px; border-radius: 8px; font-weight: 700; font-size: 0.8rem; cursor: pointer; border: 1px solid var(--border-subtle); background: transparent; color: var(--text-secondary); }
+        .modal-actions button.primary { background: rgba(0,212,255,0.15); border-color: var(--accent-cyan); color: var(--accent-cyan); }
+        .modal-box.danger .modal-actions button.primary { background: rgba(255,71,87,0.15); border-color: var(--loss); color: var(--loss); }
+        .modal-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        #toast { position: fixed; bottom: 20px; right: 20px; max-width: 420px; padding: 12px 16px; border-radius: 10px; font-size: 0.85rem; font-weight: 600; z-index: 1100; border: 1px solid; background: #0c101c; box-shadow: 0 6px 24px rgba(0,0,0,0.6); }
+        #toast[hidden] { display: none; }
+        #toast.ok { border-color: var(--profit); color: var(--profit); }
+        #toast.err { border-color: var(--loss); color: var(--loss); }
+
+        .btn-close:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; background: transparent; color: var(--text-muted); border-color: var(--text-muted); }
+        .risk-line { display: block; font-size: 0.7rem; margin-top: 3px; color: var(--text-muted); }
+        .risk-line.hot { color: #fbbf24; font-weight: 700; }
+        .risk-line.bad { color: var(--loss); font-weight: 800; }
+        .banked-sub { display: block; font-size: 0.68rem; color: var(--text-muted); margin-top: 2px; font-weight: 400; }
+        .gate-reason { display: block; font-size: 0.7rem; color: var(--text-muted); margin-top: 8px; line-height: 1.3; word-break: break-word; }
+        .badge.stale { background: rgba(251,191,36,0.1); color: #fbbf24; border: 1px solid #fbbf24; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div id="banners"></div>
+    <!-- Header & God Mode Controls -->
+    <div class="header">
+        <div class="header-title">⚡ {{ bot_name }} : 75/25 Sniper Engine</div>
+        
+        <div class="god-mode-controls">
+            <label class="text-warning">
+                LIVE FUNDS
+                <div class="switch">
+                    <input type="checkbox" id="live-toggle" onchange="toggleMode()">
+                    <span class="slider"></span>
+                </div>
+            </label>
+            <label class="text-loss">
+                BTC OVERRIDE
+                <div class="switch">
+                    <input type="checkbox" id="btc-override-toggle" class="danger" onchange="toggleBTCGate()">
+                    <span class="slider"></span>
+                </div>
+            </label>
+            <button class="btn-panic" onclick="panicSellAll()">🛑 LIQUIDATE ALL</button>
+        </div>
+
+        <div class="status-badges">
+            <span class="badge online" id="sys-status">SYSTEM ONLINE</span>
+            <span class="badge online" id="ws-status">WS CONNECTED</span>
+            <span class="badge online" id="data-status">UPDATING...</span>
+        </div>
+    </div>
+
+    <!-- KPI Grid -->
+    <div class="kpi-grid">
+        <div class="kpi-card">
+            <div class="kpi-title">Futures Net PnL</div>
+            <div class="kpi-value text-profit" id="kpi-fut-pnl">...</div>
+            <div class="kpi-sub">Win Rate: <span id="kpi-fut-wr" class="text-cyan">...</span> &middot; Open P/L: <span id="kpi-fut-unreal">...</span></div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-title">Spot Net Profit</div>
+            <div class="kpi-value text-profit" id="kpi-spot-pnl">...</div>
+            <div class="kpi-sub">Win Rate: <span id="kpi-spot-wr" class="text-cyan">...</span> &middot; Open P/L: <span id="kpi-spot-unreal">...</span></div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-title">Active Positions</div>
+            <div class="kpi-value text-cyan" id="kpi-open-pos">...</div>
+            <div class="kpi-sub" id="kpi-open-sub">...</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-title">Total Portfolio Value</div>
+            <div class="kpi-value" id="kpi-portfolio">...</div>
+            <div class="kpi-sub">Cash: <span id="kpi-cash">...</span> &middot; Mode: <span id="kpi-mode" class="text-warning">...</span></div>
+        </div>
+    </div>
+
+    <!-- Institutional Radar (Widgets) -->
+    <div class="widget-row">
+        <!-- Macro Gate -->
+        <div class="widget">
+            <div class="widget-header">MACRO GATE & REGIME</div>
+            <div class="macro-stats">
+                <span>Trend: <strong id="btc-trend">...</strong></span>
+                <span>Regime: <strong id="btc-regime" class="text-cyan">...</strong></span>
+            </div>
+            <div class="macro-stats" style="margin-bottom: 4px;">
+                <span class="text-profit">Buy Vol: <span id="btc-buy">...</span></span>
+                <span class="text-loss">Sell Vol: <span id="btc-sell">...</span></span>
+            </div>
+            <div class="pressure-bar">
+                <div class="pressure-buy" id="btc-bar" style="width: 50%;"></div>
+            </div>
+            <div class="macro-stats" style="margin-top: 12px; margin-bottom: 0;">
+                <span style="color: var(--text-muted);">ATR Volatility: <strong id="btc-atr" class="text-primary">...</strong></span>
+                <span style="color: var(--text-muted);">Status: <strong id="btc-gate" class="text-profit">...</strong></span>
+            </div>
+            <span class="gate-reason" id="btc-gate-reason"></span>
+        </div>
+
+        <!-- Powder Keg (Futures) -->
+        <div class="widget">
+            <div class="widget-header" style="color: var(--loss);">POWDER KEG HEATMAP (OI)</div>
+            <table class="mini-table">
+                <thead>
+                    <tr>
+                        <th>Asset</th>
+                        <th>Live Price</th>
+                        <th>OI/Spot Ratio</th>
+                    </tr>
+                </thead>
+                <tbody id="powder-tbody">
+                    <!-- JS Injected -->
+                </tbody>
+            </table>
+        </div>
+
+        <!-- SMC Battle Map (Spot) -->
+        <div class="widget">
+            <div class="widget-header" style="color: var(--profit);">SMC BATTLE MAP</div>
+            <table class="mini-table">
+                <thead>
+                    <tr>
+                        <th>Asset</th>
+                        <th>Type</th>
+                        <th>Direction</th>
+                        <th>Void Zone</th>
+                    </tr>
+                </thead>
+                <tbody id="smc-tbody">
+                    <!-- JS Injected -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Active Positions Table (Sniper Interface) -->
+    <div class="table-container">
+        <div style="font-size: 1.1rem; color: var(--accent-cyan); font-weight: 700; margin-bottom: 16px;">ACTIVE DEPLOYMENT LOG (75/25 SNIPER)</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Pair</th>
+                    <th>Type</th>
+                    <th>Entry & SMC Target</th>
+                    <th>Live & Stop-Loss</th>
+                    <th>Position Size</th>
+                    <th>Current PnL</th>
+                    <th>SMC Protocol</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="positions-tbody">
+                <!-- Injected via JS -->
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Split Trade History (Spot & Futures Side by Side) -->
+    <div class="widget-row" style="grid-template-columns: 1fr 1fr;">
+        
+        <!-- Futures History Table -->
+        <div class="table-container" style="margin-bottom: 0;">
+            <div style="font-size: 1rem; color: var(--text-primary); font-weight: 700; margin-bottom: 16px;">FUTURES EXITS</div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Date/Time</th>
+                        <th>Pair</th>
+                        <th>Type</th>
+                        <th>Exit Type</th>
+                        <th>Realized PnL</th>
+                        <th>PnL %</th>
+                    </tr>
+                </thead>
+                <tbody id="futures-history-tbody">
+                    <!-- Injected via JS -->
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Spot History Table -->
+        <div class="table-container" style="margin-bottom: 0;">
+            <div style="font-size: 1rem; color: var(--text-primary); font-weight: 700; margin-bottom: 16px;">SPOT EXITS</div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Date/Time</th>
+                        <th>Pair</th>
+                        <th>Exit Price</th>
+                        <th>Realized Profit</th>
+                        <th>PnL %</th>
+                    </tr>
+                </thead>
+                <tbody id="spot-history-tbody">
+                    <!-- Injected via JS -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- System Logs at the Bottom -->
+    <div class="table-container">
+        <div style="font-size: 1rem; color: var(--text-primary); font-weight: 700; margin-bottom: 16px;">SYSTEM LOGS</div>
+        <div class="logs-box" id="logs-box">
+            <!-- Injected via JS -->
+        </div>
+    </div>
+</div>
+
+<!-- Confirmation / admin-key modal (replaces the old browser pop-up boxes) -->
+<div class="modal-overlay" id="modal" hidden>
+    <div class="modal-box" id="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <div class="modal-title" id="modal-title"></div>
+        <div class="modal-text" id="modal-text"></div>
+        <input class="modal-input" id="modal-phrase" autocomplete="off" spellcheck="false" hidden>
+        <input class="modal-input" id="modal-key" type="password" placeholder="Admin key" autocomplete="off">
+        <div class="modal-error" id="modal-error"></div>
+        <div class="modal-actions">
+            <button type="button" id="modal-cancel">Cancel</button>
+            <button type="button" class="primary" id="modal-ok">Confirm</button>
+        </div>
+    </div>
+</div>
+<div id="toast" hidden></div>
+
+<script>
+    'use strict';
+
+    // ---------------------------------------------------------------- helpers
+    const $ = (id) => document.getElementById(id);
+    // Everything that comes from the server (pair names, log messages, exit types...) is escaped before it touches innerHTML.
+    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+    const num = (v, d = 0) => { const n = parseFloat(v); return Number.isFinite(n) ? n : d; };
+    const formatCurrency = (val) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(num(val));
+    const signedUsd = (v) => (v >= 0 ? '+' : '-') + '$' + Math.abs(v).toFixed(2);
+    const setText = (id, text) => { const el = $(id); if (el) el.textContent = text; };
+    const setClass = (id, cls) => { const el = $(id); if (el) el.className = cls; };
+
+    // Dynamic precision formatter
+    function formatPrice(price) {
+        const val = parseFloat(price);
+        if (isNaN(val)) return esc(price);
+        if (val < 0.001) return val.toFixed(8);
+        if (val < 1) return val.toFixed(5);
+        return val.toFixed(4);
+    }
+
+    // Safe timestamp formatter
+    function safeFormatTime(timeStr) {
+        if (!timeStr) return "--/--/---- --:--";
+        return esc(String(timeStr).replace('T', ' ').split('.')[0].split('+')[0]);
+    }
+
+    // ---------------------------------------------------------------- state
+    let currentOpenPositions = [];
+    let executionMode = 'PAPER';
+    let modalOpen = false;
+    let cachedKey = null, cachedKeyUntil = 0;      // admin key lives in memory only, for 5 minutes
+    let fetching = false, pendingForce = false, tick = 0;
+    let lastOk = 0, lastPricesAge = null;
+
+    // ---------------------------------------------------------------- toast + modal
+    let toastTimer = null;
+    function showToast(message, ok) {
+        const t = $('toast');
+        t.textContent = message;
+        t.className = ok ? 'ok' : 'err';
+        t.hidden = false;
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => { t.hidden = true; }, 7000);
+    }
+
+    // Replaces the old browser pop-up boxes: masked admin-key field, clear wording, optional "type the word" confirmation.
+    function askAdmin({ title, text, danger = false, phrase = null, okLabel = 'Confirm' }) {
+        return new Promise((resolve) => {
+            const overlay = $('modal'), box = $('modal-box'), keyEl = $('modal-key'), phraseEl = $('modal-phrase');
+            const okBtn = $('modal-ok'), cancelBtn = $('modal-cancel');
+            modalOpen = true;
+            setText('modal-title', title);
+            setText('modal-text', text);
+            setText('modal-error', '');
+            box.className = 'modal-box' + (danger ? ' danger' : '');
+            keyEl.value = (cachedKey && Date.now() < cachedKeyUntil) ? cachedKey : '';
+            phraseEl.hidden = !phrase;
+            phraseEl.value = '';
+            phraseEl.placeholder = phrase ? ('Type ' + phrase + ' to confirm') : '';
+            okBtn.textContent = okLabel;
+            overlay.hidden = false;
+
+            const validate = () => { okBtn.disabled = !keyEl.value || (phrase !== null && phraseEl.value.trim() !== phrase); };
+            const finish = (value) => {
+                overlay.hidden = true;
+                modalOpen = false;
+                keyEl.removeEventListener('input', validate);
+                phraseEl.removeEventListener('input', validate);
+                okBtn.removeEventListener('click', onOk);
+                cancelBtn.removeEventListener('click', onCancel);
+                document.removeEventListener('keydown', onKeyDown);
+                keyEl.value = '';
+                resolve(value);
+            };
+            const onOk = () => { if (!okBtn.disabled) finish(keyEl.value); };
+            const onCancel = () => finish(null);
+            const onKeyDown = (e) => { if (e.key === 'Escape') onCancel(); else if (e.key === 'Enter') onOk(); };
+
+            keyEl.addEventListener('input', validate);
+            phraseEl.addEventListener('input', validate);
+            okBtn.addEventListener('click', onOk);
+            cancelBtn.addEventListener('click', onCancel);
+            document.addEventListener('keydown', onKeyDown);
+            validate();
+            (phrase ? phraseEl : keyEl).focus();
+        });
+    }
+
+    async function adminPost(url, body, key) {
+        let res;
+        try {
+            res = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Admin-Key': key },
+                body: JSON.stringify(body || {})
+            });
+        } catch (e) {
+            return { ok: false, status: 0, data: { error: 'Network error - is the server running?' } };
+        }
+        let data = {};
+        try { data = await res.json(); } catch (e) { data = { error: 'Unexpected reply from the server (HTTP ' + res.status + ')' }; }
+        if (res.status === 403 && /unauthorized|ADMIN_KEY/i.test(String(data.error || ''))) cachedKey = null;
+        else if (res.ok) { cachedKey = key; cachedKeyUntil = Date.now() + 5 * 60 * 1000; }
+        return { ok: res.ok, status: res.status, data };
+    }
+
+    // ---------------------------------------------------------------- GOD MODE CONTROLS
+    async function toggleMode() {
+        const cb = $('live-toggle');
+        const wantLive = cb.checked;
+        const key = await askAdmin(wantLive ? {
+            title: 'Switch to LIVE FUNDS?',
+            text: 'The engines will place REAL orders with REAL money. The server refuses this unless LIVE trading has been unlocked (ALLOW_LIVE_TRADING).\n\nOpen PAPER positions stop being managed while LIVE is on.',
+            danger: true, phrase: 'LIVE', okLabel: 'Go LIVE'
+        } : {
+            title: 'Switch to PAPER trading?',
+            text: 'The engines will use simulated funds.\n\nAny open LIVE positions stop being managed by the bot - close them on Binance.',
+            okLabel: 'Switch to PAPER'
+        });
+        if (!key) { cb.checked = !wantLive; return; }
+        const r = await adminPost('/api/toggle-mode', { paper_trading_enabled: wantLive ? '0' : '1' }, key);
+        if (!r.ok) { cb.checked = !wantLive; showToast(r.data.error || 'Could not change the mode.', false); }
+        else showToast('Trading mode is now ' + esc(r.data.mode), true);
+        fetchData(true);
+    }
+
+    async function toggleBTCGate() {
+        const cb = $('btc-override-toggle');
+        const override = cb.checked;
+        const key = await askAdmin(override ? {
+            title: 'FORCE the BTC gate open?',
+            text: 'New entries will ignore the BTC decline/pressure protection, even during a crash. Use only for testing.',
+            danger: true, okLabel: 'Force open'
+        } : {
+            title: 'Restore the BTC gate?',
+            text: 'The BTC decline/pressure protection applies to new entries again.',
+            okLabel: 'Restore'
+        });
+        if (!key) { cb.checked = !override; return; }
+        const r = await adminPost('/api/toggle-btc-gate', { override: override ? '1' : '0' }, key);
+        if (!r.ok) { cb.checked = !override; showToast(r.data.error || 'Could not change the BTC gate.', false); }
+        else showToast('BTC gate override ' + (override ? 'ON' : 'OFF'), true);
+        fetchData(true);
+    }
+
+    async function panicSellAll() {
+        if (currentOpenPositions.length === 0) { showToast('No open positions to liquidate.', false); return; }
+        const key = await askAdmin({
+            title: 'LIQUIDATE ALL positions?',
+            text: 'This closes all ' + currentOpenPositions.length + ' open positions at the current live prices.\n\nPAPER positions are closed in the ledger. LIVE positions are skipped - close those on Binance.',
+            danger: true, phrase: 'LIQUIDATE', okLabel: 'Liquidate All'
+        });
+        if (!key) return;
+        const r = await adminPost('/api/trades/liquidate-all', {}, key);
+        showToast(r.ok ? (r.data.message || 'Liquidation complete.') : (r.data.error || 'Liquidation failed.'), r.ok);
+        fetchData(true);
+    }
+
+    // Force Close buttons (event delegation - no inline handlers built from server data)
+    document.addEventListener('click', async (e) => {
+        const btn = e.target.closest ? e.target.closest('button[data-act="close"]') : null;
+        if (!btn || btn.disabled) return;
+        const type = btn.dataset.type, id = btn.dataset.id, pair = btn.dataset.pair;
+        const p = currentOpenPositions.find((x) => String(x.id) === id && x.type === type);
+        const key = await askAdmin({
+            title: 'Force close ' + pair + '?',
+            text: 'Closes this ' + type + ' position at the current live price.\nCurrent P/L: ' + (p ? p.pnl_formatted : 'n/a'),
+            danger: true, okLabel: 'Force Close'
+        });
+        if (!key) return;
+        const r = await adminPost('/api/trades/close/' + encodeURIComponent(type) + '/' + encodeURIComponent(id), {}, key);
+        showToast(r.ok ? (r.data.message || 'Position closed.') : (r.data.error || 'Failed to close the position.'), r.ok);
+        fetchData(true);
+    });
+
+    // ---------------------------------------------------------------- renderers
+    function setBanners(items) {
+        $('banners').innerHTML = items.map((b) => '<div class="banner ' + b.kind + '">' + esc(b.text) + '</div>').join('');
+    }
+
+    function renderStatus(status) {
+        const halted = status.status === 'HALTED' || status.macro_halt === true;
+        setText('sys-status', status.status);
+        setClass('sys-status', halted ? 'badge offline' : 'badge online');
+
+        executionMode = status.execution_mode === 'LIVE TRADING' ? 'LIVE' : 'PAPER';
+        setText('kpi-mode', status.execution_mode);
+        setClass('kpi-mode', executionMode === 'LIVE' ? 'text-loss' : 'text-warning');
+
+        if (!modalOpen) {
+            $('live-toggle').checked = (executionMode === 'LIVE');
+            if (typeof status.btc_gate_override === 'boolean') $('btc-override-toggle').checked = status.btc_gate_override;
+        }
+
+        if (typeof status.ws_connected === 'boolean') {
+            setText('ws-status', status.ws_connected ? 'WS CONNECTED' : 'WS DOWN - REST FALLBACK');
+            setClass('ws-status', status.ws_connected ? 'badge online' : 'badge offline');
+        }
+
+        setText('btc-regime', status.macro_regime);
+        setText('btc-gate', status.btc_gate_allowed ? 'ALLOW' : 'BLOCK');
+        setClass('btc-gate', status.btc_gate_allowed ? 'text-profit' : 'text-loss');
+        setText('btc-gate-reason', status.btc_gate_reason || '');
+
+        lastPricesAge = (typeof status.prices_age_seconds === 'number') ? status.prices_age_seconds : null;
+
+        const banners = [];
+        if (executionMode === 'LIVE') banners.push({ kind: 'danger', text: 'LIVE FUNDS ACTIVE - real orders are being placed.' });
+        if (halted) banners.push({ kind: 'warn', text: 'MACRO HALT - new entries are paused and positions are being flattened around a high-impact event.' });
+        if (status.btc_gate_override === true) banners.push({ kind: 'warn', text: 'BTC GATE OVERRIDDEN - entries ignore the BTC decline protection.' });
+        if (lastPricesAge !== null && lastPricesAge > 20) banners.push({ kind: 'danger', text: 'PRICE FEED STALE (' + Math.round(lastPricesAge) + 's) - the engines ignore stale prices and will not trade or manage stops until it recovers.' });
+        setBanners(banners);
+    }
+
+    function renderSentiment(sent) {
+        setText('btc-trend', sent.trend);
+        setClass('btc-trend', sent.trend === 'BULLISH' ? 'text-profit' : (sent.trend === 'BEARISH' ? 'text-loss' : 'text-cyan'));
+        setText('btc-buy', sent.buy_pressure);
+        setText('btc-sell', sent.sell_pressure);
+        $('btc-bar').style.width = String(sent.buy_pressure || '50%').replace(/[^0-9.%]/g, '') || '50%';
+        setText('btc-atr', sent.atr);
+    }
+
+    function colorClass(v) { return v >= 0 ? 'text-profit' : 'text-loss'; }
+
+    function renderStats(spot, fut) {
+        setText('kpi-fut-pnl', formatCurrency(fut.net_pnl));
+        setClass('kpi-fut-pnl', 'kpi-value ' + colorClass(num(fut.net_pnl)));
+        setText('kpi-fut-wr', fut.win_rate);
+        setText('kpi-fut-unreal', signedUsd(num(fut.unrealized_pnl)));
+        setClass('kpi-fut-unreal', colorClass(num(fut.unrealized_pnl)));
+
+        setText('kpi-spot-pnl', formatCurrency(spot.total_profit));
+        setClass('kpi-spot-pnl', 'kpi-value ' + colorClass(num(spot.total_profit)));
+        setText('kpi-spot-wr', spot.win_rate);
+        setText('kpi-spot-unreal', signedUsd(num(spot.unrealized_pnl)));
+        setClass('kpi-spot-unreal', colorClass(num(spot.unrealized_pnl)));
+
+        setText('kpi-open-pos', num(fut.open_positions) + num(spot.open_positions));
+        setText('kpi-open-sub', 'Futures ' + num(fut.open_positions) + ' \u00b7 Spot ' + num(spot.open_positions));
+        setText('kpi-portfolio', formatCurrency(num(fut.portfolio_value) + num(spot.portfolio_value)));
+        setText('kpi-cash', formatCurrency(num(fut.cash_balance) + num(spot.cash_balance)));
+    }
+
+    function renderPowder(powders) {
+        const rows = (powders || []).map((p) =>
+            '<tr><td style="font-weight:700;">' + esc(p.pair) + '</td>' +
+            '<td class="font-mono">$' + formatPrice(p.last_price) + '</td>' +
+            '<td class="font-mono text-loss">' + num(p.oi_spot_ratio).toFixed(2) + 'x</td></tr>');
+        $('powder-tbody').innerHTML = rows.length ? rows.join('') :
+            '<tr><td colspan="3" style="text-align: center; color: var(--text-muted);">No Extreme OI Detected</td></tr>';
+    }
+
+    function renderSmc(smcs) {
+        const rows = (smcs || []).map((s) => {
+            const dClass = s.direction === 'BULLISH' ? 'text-profit' : 'text-loss';
+            return '<tr><td style="font-weight:700;">' + esc(s.pair) + '</td>' +
+                '<td class="font-mono" style="font-size:0.7rem;">' + esc(s.pool_type) + '</td>' +
+                '<td class="' + dClass + '" style="font-size:0.75rem;">' + esc(s.direction) + '</td>' +
+                '<td class="font-mono" style="font-size:0.75rem;">$' + formatPrice(s.bottom_price) + ' - $' + formatPrice(s.top_price) + '</td></tr>';
+        });
+        $('smc-tbody').innerHTML = rows.length ? rows.join('') :
+            '<tr><td colspan="4" style="text-align: center; color: var(--text-muted);">Mapping Voids...</td></tr>';
+    }
+
+    function renderPositions(positions) {
+        currentOpenPositions = positions;
+        const tbody = $('positions-tbody');
+        if (positions.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-muted);">No active positions. Scanning SMC zones...</td></tr>';
+            return;
+        }
+        const rows = positions.map((p) => {
+            const pnl = num(p.pnl_usdt);
+            const isFut = p.type === 'futures';
+            const entry = num(p.entry_raw, num(String(p.entry).replace(/[^0-9.\-]+/g, '')));
+            const live = num(p.live_raw, num(String(p.live_price).replace(/[^0-9.\-]+/g, '')));
+            const sl = num(p.current_sl), tp = num(p.dynamic_tp1);
+            const lev = num(p.leverage, num((String(p.size).match(/\((\d+)x\)/) || [])[1]));
+            const tagClass = p.direction === 'LONG' ? 'long' : (p.direction === 'SHORT' ? 'short' : 'spot');
+            const isShort = p.direction === 'SHORT';
+            const targetLabel = isFut ? 'TP1' : 'TARGET';
+
+            // distances as % of entry
+            const favPct = (tp > 0 && entry > 0) ? (isShort ? entry - tp : tp - entry) / entry * 100 : null;
+            const advPct = (sl > 0 && entry > 0) ? (isShort ? sl - entry : entry - sl) / entry * 100 : null;
+
+            const entryData = '<span class="font-mono">$' + formatPrice(entry) + '</span>' +
+                '<span class="watermark-sub">' + targetLabel + ': $' + formatPrice(tp) + (favPct !== null ? ' (' + (favPct >= 0 ? '+' : '') + favPct.toFixed(2) + '%)' : '') + '</span>';
+
+            let slText;
+            if (sl <= 0) slText = 'SL: none';
+            else if (p.tp1) slText = 'SL: $' + formatPrice(sl) + ' (breakeven)';
+            else slText = 'SL: $' + formatPrice(sl) + (advPct !== null ? ' (-' + Math.abs(advPct).toFixed(2) + '%)' : '');
+            const liveData = '<span class="font-mono">$' + formatPrice(live) + '</span><span class="watermark-sub">' + esc(slText) + '</span>';
+
+            let riskHtml = '';
+            if (isFut && !p.tp1 && advPct !== null && lev > 0) {
+                const riskPct = Math.abs(advPct) * lev;
+                if (riskPct >= 100) riskHtml = '<span class="risk-line bad">\u26a0 STOP BEYOND LIQUIDATION (' + riskPct.toFixed(0) + '% of margin)</span>';
+                else if (riskPct >= 50) riskHtml = '<span class="risk-line hot">Risk at stop: -' + riskPct.toFixed(0) + '% of margin</span>';
+                else riskHtml = '<span class="risk-line">Risk at stop: -' + riskPct.toFixed(0) + '% of margin</span>';
+            }
+
+            let protocolHtml = '';
+            if (p.tp1) {
+                protocolHtml += '<span class="sniper-badge active-secure">75% SECURED</span>';
+                protocolHtml += '<span class="sniper-badge active-breakeven">B.E. ACTIVE</span>';
+                protocolHtml += '<span class="watermark-sub">Peak: $' + formatPrice(p.watermark) + '</span>';
+            } else {
+                protocolHtml += '<span class="sniper-badge">AWAITING TP1</span>';
+            }
+
+            const bankedHtml = (p.tp1 && typeof p.banked_usdt === 'number')
+                ? '<span class="banked-sub">banked ' + signedUsd(p.banked_usdt) + ' + runner ' + signedUsd(num(p.unrealized_usdt)) + '</span>' : '';
+
+            const action = executionMode === 'LIVE'
+                ? '<button class="btn-close" disabled title="LIVE trades must be closed on Binance">Close on Binance</button>'
+                : '<button class="btn-close" data-act="close" data-type="' + esc(p.type) + '" data-id="' + esc(p.id) + '" data-pair="' + esc(p.pair) + '">Force Close</button>';
+
+            return '<tr>' +
+                '<td style="font-weight: 700;">' + esc(p.pair) + '</td>' +
+                '<td><span class="tag ' + tagClass + '">' + esc(p.direction) + '</span></td>' +
+                '<td>' + entryData + '</td>' +
+                '<td>' + liveData + '</td>' +
+                '<td>' + esc(p.size) + riskHtml + '</td>' +
+                '<td class="' + colorClass(pnl) + ' font-mono font-weight-700">' + esc(p.pnl_formatted) + bankedHtml + '</td>' +
+                '<td>' + protocolHtml + '</td>' +
+                '<td>' + action + '</td>' +
+                '</tr>';
+        });
+        tbody.innerHTML = rows.join('');
+    }
+
+    function directionCell(direction) {
+        const d = String(direction || '').toUpperCase();
+        const cls = d === 'LONG' ? 'long' : (d === 'SHORT' ? 'short' : 'spot');
+        return '<td><span class="tag ' + cls + '">' + esc(d || '?') + '</span></td>';
+    }
+
+    function historyRow(h, pnlPct, middleCell, typeCell) {
+        const pnl = num(h.realized_pnl);
+        const up = pnl >= 0;
+        const cls = up ? 'text-profit' : 'text-loss';
+        return '<tr>' +
+            '<td class="font-mono" style="font-size:0.75rem; color:var(--text-muted);">' + safeFormatTime(h.closed_at) + '</td>' +
+            '<td style="font-weight: 700;">' + esc(h.pair) + '</td>' +
+            (typeCell || '') +
+            middleCell +
+            '<td class="' + cls + ' font-mono">' + (up ? '+' : '-') + '$' + Math.abs(pnl).toFixed(2) + '</td>' +
+            '<td class="' + cls + ' font-mono" style="font-size:0.8rem;">' + (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(2) + '%</td>' +
+            '</tr>';
+    }
+
+    function renderHistory(hist) {
+        const fut = hist.futures_trades || [];
+        const spot = hist.spot_trades || [];
+        $('futures-history-tbody').innerHTML = fut.length ? fut.map((h) =>
+            historyRow(h, num(h.pnl_pct != null ? h.pnl_pct : h.profit_pct),
+                '<td class="font-mono" style="font-size:0.75rem;">' + esc(h.close_type || 'UNKNOWN') + '</td>',
+                directionCell(h.direction))).join('') :
+            '<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">No closed futures trades yet.</td></tr>';
+        $('spot-history-tbody').innerHTML = spot.length ? spot.map((h) =>
+            historyRow(h, num(h.profit_pct != null ? h.profit_pct : h.pnl_pct),
+                '<td class="font-mono">$' + formatPrice(h.exit_price) + '</td>')).join('') :
+            '<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">No closed spot trades yet.</td></tr>';
+    }
+
+    function renderLogs(logs) {
+        const box = $('logs-box');
+        const keep = box.scrollTop;
+        box.innerHTML = (logs || []).slice(0, 120).map((l) => {
+            const level = String(l.level || 'INFO').replace(/[^A-Z]/g, '');
+            const time = String(l.timestamp || '').split('T')[1];
+            return '<div class="log-entry">' +
+                '<span class="log-time">[' + esc(time ? time.split('.')[0].split('+')[0] : '--:--:--') + ']</span> ' +
+                '<span class="log-' + level + '">[' + esc(level) + ']</span> ' +
+                '<span style="color: #cbd5e1;">' + esc(l.message) + '</span></div>';
+        }).join('');
+        box.scrollTop = keep;
+    }
+
+    // ---------------------------------------------------------------- data pipeline
+    async function getJSON(url) {
+        const r = await fetch(url, { cache: 'no-store' });
+        if (!r.ok) throw new Error(url + ' HTTP ' + r.status);
+        return r.json();
+    }
+
+    function updateDataBadge() {
+        const el = $('data-status');
+        if (!el) return;
+        const age = lastOk ? (Date.now() - lastOk) / 1000 : Infinity;
+        if (document.hidden) { el.textContent = 'PAUSED - TAB HIDDEN'; el.className = 'badge stale'; }
+        else if (age > 10) { el.textContent = 'DASHBOARD OFFLINE'; el.className = 'badge offline'; }
+        else if (lastPricesAge !== null && lastPricesAge > 20) { el.textContent = 'PRICES STALE ' + Math.round(lastPricesAge) + 's'; el.className = 'badge stale'; }
+        else { el.textContent = 'UPDATED ' + new Date(lastOk).toLocaleTimeString(); el.className = 'badge online'; }
+    }
+
+    async function fetchData(force) {
+        if (fetching) { if (force) pendingForce = true; return; }
+        fetching = true;
+        try {
+            const slow = force || tick % 5 === 0;     // zones / OI / history: every ~15s
+            const logs = force || tick % 2 === 0;     // logs: every ~6s
+            const jobs = [
+                ['status', '/api/status'], ['sent', '/api/btc-sentiment'], ['spot', '/api/statistics'],
+                ['fut', '/api/futures/statistics'], ['pos', '/api/positions']
+            ];
+            if (slow) jobs.push(['powder', '/api/market/powder-keg'], ['smc', '/api/market/smc-zones'], ['hist', '/api/trades']);
+            if (logs) jobs.push(['logs', '/api/logs']);
+
+            const settled = await Promise.allSettled(jobs.map((j) => getJSON(j[1])));
+            const R = {};
+            jobs.forEach((j, i) => { if (settled[i].status === 'fulfilled') R[j[0]] = settled[i].value; });
+
+            const safe = (fn) => { try { fn(); } catch (e) { console.error('Render error:', e); } };
+            if (R.status) safe(() => renderStatus(R.status));
+            if (R.sent) safe(() => renderSentiment(R.sent));
+            if (R.spot && R.fut) safe(() => renderStats(R.spot, R.fut));
+            if (R.pos) safe(() => renderPositions(R.pos));
+            if (R.powder) safe(() => renderPowder(R.powder));
+            if (R.smc) safe(() => renderSmc(R.smc));
+            if (R.hist) safe(() => renderHistory(R.hist));
+            if (R.logs) safe(() => renderLogs(R.logs));
+            if (R.status || R.pos) lastOk = Date.now();
+        } catch (e) {
+            console.error('UI Fetch Error:', e);
+        } finally {
+            fetching = false;
+            tick++;
+            updateDataBadge();
+            if (pendingForce) { pendingForce = false; setTimeout(() => fetchData(true), 0); }
+        }
+    }
+
+    async function loop() {
+        if (!document.hidden) await fetchData(false);
+        updateDataBadge();
+        setTimeout(loop, 3000);
+    }
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) fetchData(true); });
+    setInterval(updateDataBadge, 1000);
+    loop();
+
+</script>
+</body>
+</html>
