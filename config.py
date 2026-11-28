@@ -92,11 +92,23 @@ FUTURES_CONFIG = {
     "paper_slippage_pct": 0.02,           # Paper fills are 0.02% worse than the quote (entry and every exit)
     "live_slippage_buffer_pct": 0.04,     # Round-trip slippage buffer used when sizing LIVE trades
 
-    # --- SELF-AWARENESS: probation circuit breaker ---
+    # --- SELF-AWARENESS: probation & regime caution ---
     "probation_loss_streak": 3,           # Consecutive closed losses before entering PROBATION (0 = disabled)
     "probation_risk_multiplier": 0.25,    # Risk multiplier during PROBATION ($0.50 -> $0.125)
     "probation_max_positions": 2,         # Max simultaneous open futures slots during PROBATION
     "probation_wins_to_recover": 1,       # Consecutive winning closes required to exit PROBATION
+    "caution_risk_multiplier": 0.50,      # Risk multiplier during BTC CHOP/SHOCK ($0.50 -> $0.25)
+    "caution_max_positions": 2,           # Max simultaneous open futures slots during CAUTION
+    "throttle_on_btc_chop": True,         # Enter CAUTION when BTC 1h structure is choppy
+    "throttle_on_btc_shock": True,        # Enter CAUTION when BTC 4h move is a shock
+}
+
+# --- MARKET REGIME / CHOP-SHOCK CLASSIFIER ---
+REGIME_CONFIG = {
+    "bbw_ranging_threshold_pct": 2.5,
+    "er_lookback_candles": 12,            # 12h Kaufman Efficiency Ratio window
+    "er_chop_threshold": 0.25,            # ER below 0.25 = choppy/directionless whip-saw
+    "shock_4h_move_pct": 3.5,             # |4h move| >= 3.5% = sudden shock/impulse regime
 }
 
 # --- DYNAMIC RISK MANAGEMENT (ATR SIZING) ---

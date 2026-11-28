@@ -54,6 +54,8 @@ MARKET_STATE = {
     "btc_sentiment": "NEUTRAL",
     "btc_trend": "NEUTRAL",
     "btc_atr_1h": 0.0,
+    "btc_market_state": "TREND",
+    "btc_efficiency_ratio": 1.0,
     "computed_allow": False,
     "computed_reason": "Waiting for BTC data (fail-closed)",
     "klines_1h": [],

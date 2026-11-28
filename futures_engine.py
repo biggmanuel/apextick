@@ -11,6 +11,7 @@ from config import (FUTURES_CONFIG, MARKET_SCANNER_CONFIG, POWDER_KEG_CONFIG,
                     exchange as live_exchange)
 from database import execute_query, execute_update_rowcount, add_log
 from btc_decline_signal import is_trading_allowed_by_btc_gate, get_fresh_price, MARKET_STATE
+from regime_manager import classify_btc_market_state
 
 # =============================================================================
 # CONSTANTS & CONFIGURATION
@@ -30,11 +31,15 @@ SKIP_LOG_INTERVAL_SECONDS = FUTURES_CONFIG.get("skip_log_interval_seconds", 300)
 PAPER_SLIPPAGE_PCT = FUTURES_CONFIG.get("paper_slippage_pct", 0.02)   # paper fills are this much WORSE than the quote
 LIVE_SLIPPAGE_BUFFER_PCT = FUTURES_CONFIG.get("live_slippage_buffer_pct", 0.04)
 
-# --- SELF-AWARENESS: PROBATION CIRCUIT BREAKER ---
+# --- SELF-AWARENESS: PROBATION & REGIME CAUTION ---
 PROBATION_LOSS_STREAK = FUTURES_CONFIG.get("probation_loss_streak", 3)
 PROBATION_RISK_MULTIPLIER = FUTURES_CONFIG.get("probation_risk_multiplier", 0.25)
 PROBATION_MAX_POSITIONS = FUTURES_CONFIG.get("probation_max_positions", 2)
 PROBATION_WINS_TO_RECOVER = FUTURES_CONFIG.get("probation_wins_to_recover", 1)
+CAUTION_RISK_MULTIPLIER = FUTURES_CONFIG.get("caution_risk_multiplier", 0.50)
+CAUTION_MAX_POSITIONS = FUTURES_CONFIG.get("caution_max_positions", 2)
+THROTTLE_ON_BTC_CHOP = bool(FUTURES_CONFIG.get("throttle_on_btc_chop", True))
+THROTTLE_ON_BTC_SHOCK = bool(FUTURES_CONFIG.get("throttle_on_btc_shock", True))
 
 def _paper_fill(price: float, is_buy: bool) -> float:
     """Paper-trading fill price: buys fill a little higher, sells a little lower (slippage)."""
@@ -44,7 +49,7 @@ def _paper_fill(price: float, is_buy: bool) -> float:
 # --- SKIP-REASON TRACKING (one summary log line per interval instead of per-tick spam) ---
 _SKIP_STATS = {}
 _LAST_SKIP_LOG = time.time()
-COUNT_ONLY_REASONS = {"no_zone_at_price", "account_cooldown", "max_positions", "probation_max_positions", "low_margin", "btc_gate_block", "stale_prices", "live_locked"}
+COUNT_ONLY_REASONS = {"no_zone_at_price", "account_cooldown", "max_positions", "probation_max_positions", "caution_max_positions", "low_margin", "btc_gate_block", "stale_prices", "live_locked"}
 
 def _note_skip(reason: str, pair: str):
     bucket = _SKIP_STATS.setdefault(reason, {})
@@ -157,15 +162,29 @@ def is_pair_on_cooldown(account_id: str, pair: str, mode: str) -> tuple[bool, in
 def get_futures_bot_state(account_id: str, mode: str) -> dict:
     """
     Self-awareness state machine for Futures entries.
-    Walks recent closed trades chronologically so state survives restarts cleanly:
-      - Enters PROBATION after PROBATION_LOSS_STREAK consecutive closed losses (pnl <= 0).
-      - Exits PROBATION after PROBATION_WINS_TO_RECOVER consecutive winning closes (pnl > 0).
+    Combines account-level loss-streak PROBATION with BTC-level CAUTION (CHOP/SHOCK):
+      - PROBATION (highest priority): after PROBATION_LOSS_STREAK consecutive closed losses
+        (pnl <= 0); exits after PROBATION_WINS_TO_RECOVER consecutive winning closes.
+      - CAUTION: when BTC 1h structure is CHOP or SHOCK (per Kaufman ER / 4h shock).
+      - NORMAL: full risk and full slot budget.
     """
     normal_max = int(FUTURES_CONFIG.get("max_open_positions", 5))
     trigger = int(PROBATION_LOSS_STREAK or 0)
     wins_needed = max(1, int(PROBATION_WINS_TO_RECOVER or 1))
     prob_mult = float(PROBATION_RISK_MULTIPLIER)
     prob_max = max(1, min(int(PROBATION_MAX_POSITIONS), normal_max))
+    caut_mult = float(CAUTION_RISK_MULTIPLIER)
+    caut_max = max(1, min(int(CAUTION_MAX_POSITIONS), normal_max))
+
+    klines = MARKET_STATE.get("klines_1h") or []
+    if len(klines) >= 5:
+        m_state, er, pct_4h = classify_btc_market_state(klines)
+        MARKET_STATE["btc_market_state"] = m_state
+        MARKET_STATE["btc_efficiency_ratio"] = er
+    else:
+        m_state = MARKET_STATE.get("btc_market_state", "TREND")
+        er = float(MARKET_STATE.get("btc_efficiency_ratio", 1.0))
+        pct_4h = 0.0
 
     rows = execute_query(
         """SELECT pnl_usdt FROM futures_trades
@@ -199,7 +218,22 @@ def get_futures_bot_state(account_id: str, mode: str) -> dict:
             "recovery_wins": recovery_wins,
             "risk_multiplier": prob_mult,
             "max_positions": prob_max,
+            "market_state": m_state,
+            "efficiency_ratio": er,
             "reason": f"Loss streak L{loss_streak} >= {trigger} (risk {int(prob_mult * 100)}%, max {prob_max} slots)",
+        }
+
+    if (m_state == "CHOP" and THROTTLE_ON_BTC_CHOP) or (m_state == "SHOCK" and THROTTLE_ON_BTC_SHOCK):
+        detail = f"ER={er:.2f}" if m_state == "CHOP" else f"4h={pct_4h:+.2f}%"
+        return {
+            "state": "CAUTION",
+            "loss_streak": loss_streak,
+            "recovery_wins": 0,
+            "risk_multiplier": caut_mult,
+            "max_positions": caut_max,
+            "market_state": m_state,
+            "efficiency_ratio": er,
+            "reason": f"BTC {m_state} ({detail}; risk {int(caut_mult * 100)}%, max {caut_max} slots)",
         }
 
     return {
@@ -208,6 +242,8 @@ def get_futures_bot_state(account_id: str, mode: str) -> dict:
         "recovery_wins": 0,
         "risk_multiplier": 1.0,
         "max_positions": normal_max,
+        "market_state": m_state,
+        "efficiency_ratio": er,
         "reason": "Normal operation",
     }
 
@@ -565,7 +601,12 @@ def run_futures_engine_tick() -> str:
             (acct_id, CURRENT_MODE), fetch_all=True
         )
         if len(open_positions) >= bot_state["max_positions"]:
-            _note_skip("probation_max_positions" if bot_state["state"] != "NORMAL" else "max_positions", "-")
+            if bot_state["state"] == "PROBATION":
+                _note_skip("probation_max_positions", "-")
+            elif bot_state["state"] == "CAUTION":
+                _note_skip("caution_max_positions", "-")
+            else:
+                _note_skip("max_positions", "-")
             continue
         held_pairs = {p["pair"] for p in open_positions}
 

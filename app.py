@@ -17,8 +17,11 @@ from btc_decline_signal import (
 
 # Execution Engines
 from spot_engine import run_spot_scalper_tick
-from futures_engine import run_futures_engine_tick
-from grid_engine import GridEngine
+from futures_engine import (
+    run_futures_engine_tick,
+    calculate_futures_macro_trend,
+    get_futures_bot_state,
+)
 
 # Quantitative Brains
 from regime_manager import RegimeManager
@@ -87,10 +90,7 @@ def start_background_services():
     macro = MacroCalendar()
     threading.Thread(target=macro.monitor_loop, daemon=True).start()
 
-    # Phase 3: Spin up the Execution Arms
-    grid = GridEngine()   # NOTE: stub - it only writes PENDING_GRID rows and places no orders
-    threading.Thread(target=grid.start, daemon=True).start()
-
+    # Phase 3: Spin up the Execution Arms (GridEngine stub intentionally not started)
     threading.Thread(target=spot_engine_loop, daemon=True).start()
     threading.Thread(target=futures_engine_loop, daemon=True).start()
 
@@ -255,7 +255,8 @@ def toggle_btc_gate():
 
 @app.route("/api/status", methods=["GET"])
 def api_status():
-    is_paper = (get_trade_mode() == "PAPER")
+    current_mode = get_trade_mode()
+    is_paper = (current_mode == "PAPER")
 
     halt_row = execute_query("SELECT value FROM bot_settings WHERE key = 'macro_halt'", fetch_one=True)
     is_halted = bool(halt_row and str(halt_row["value"]).strip() == "1")
@@ -268,6 +269,11 @@ def api_status():
     prices_ts = float(MARKET_STATE.get("prices_ts") or 0.0)
     prices_age = (time.time() - prices_ts) if prices_ts > 0 else None
 
+    acct_row = execute_query("SELECT account_id FROM accounts WHERE futures_enabled = 1 ORDER BY id ASC LIMIT 1", fetch_one=True)
+    acct_id = acct_row["account_id"] if acct_row else "Emmanuel_Paper_150"
+    bot_state = get_futures_bot_state(acct_id, current_mode)
+    btc_ema_trend = calculate_futures_macro_trend()
+
     allowed, gate_reason = is_trading_allowed_by_btc_gate()
     return jsonify({
         "btc_gate_override": gate_override,
@@ -279,7 +285,14 @@ def api_status():
         "btc_gate_reason": gate_reason,
         "ws_connected": MARKET_STATE.get("ws_connected", False),
         "execution_mode": "PAPER TRADING" if is_paper else "LIVE TRADING",
-        "macro_regime": btc_regime_row["regime"] if btc_regime_row else "TRENDING"
+        "macro_regime": btc_regime_row["regime"] if btc_regime_row else "TRENDING",
+        "btc_ema_trend": btc_ema_trend,
+        "btc_market_state": bot_state["market_state"],
+        "btc_efficiency_ratio": bot_state["efficiency_ratio"],
+        "futures_bot_state": bot_state["state"],
+        "futures_bot_reason": bot_state["reason"],
+        "futures_risk_multiplier": bot_state["risk_multiplier"],
+        "futures_max_positions": bot_state["max_positions"],
     })
 
 # =============================================================================
@@ -291,6 +304,9 @@ def api_btc_sentiment():
     return jsonify({
         "sentiment": MARKET_STATE.get("btc_sentiment", "NEUTRAL"),
         "trend": MARKET_STATE.get("btc_trend", "NEUTRAL"),
+        "ema_trend": calculate_futures_macro_trend(),
+        "market_state": MARKET_STATE.get("btc_market_state", "TREND"),
+        "efficiency_ratio": MARKET_STATE.get("btc_efficiency_ratio", 1.0),
         "atr": f"{MARKET_STATE.get('btc_atr_1h', 0.0):.2f}",
         "change_24h": f"{MARKET_STATE.get('btc_24h_change', 0.0):+.2f}%",
         "buy_pressure": f"{MARKET_STATE.get('buy_pressure_pct', 50.0)}%",
@@ -303,7 +319,7 @@ def api_powder_keg():
     pairs = execute_query("""
         SELECT pair, last_price, oi_spot_ratio, change_24h_pct
         FROM trading_pairs
-        WHERE oi_spot_ratio > 3.0 AND futures_supported = 1
+        WHERE status = 'ACTIVE' AND oi_spot_ratio > 3.0 AND futures_supported = 1
         ORDER BY oi_spot_ratio DESC LIMIT 5
     """, fetch_all=True)
     return jsonify(pairs if pairs else [])

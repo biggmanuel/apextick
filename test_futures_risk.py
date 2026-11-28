@@ -150,6 +150,13 @@ q("""INSERT INTO futures_trades (account_id,pair,trade_mode,direction,status,ent
 st2 = F.get_futures_bot_state("Emmanuel_Paper_150", "PAPER")
 check("1 winning close exits probation back to NORMAL", st2["state"] == "NORMAL" and st2["risk_multiplier"] == 1.0 and st2["max_positions"] == 5, str(st2))
 
+# BTC CHOP enters CAUTION (50% risk, max 2 slots) even with no loss streak
+saved_kl = list(MARKET_STATE["klines_1h"])
+MARKET_STATE["klines_1h"] = [{"c": 100.0 + (1.0 if i % 2 == 0 else -1.0)} for i in range(25)]
+st_chop = F.get_futures_bot_state("Emmanuel_Paper_150", "PAPER")
+check("BTC CHOP triggers CAUTION (50% risk, max 2 slots)", st_chop["state"] == "CAUTION" and st_chop["risk_multiplier"] == 0.5 and st_chop["max_positions"] == 2 and st_chop["market_state"] == "CHOP", str(st_chop))
+MARKET_STATE["klines_1h"] = saved_kl
+
 # ---- 8. Atomic exit guard: concurrent force-close prevents double-credit in engine
 q("DELETE FROM futures_trades", commit=True)
 q("DELETE FROM trading_pairs", commit=True)

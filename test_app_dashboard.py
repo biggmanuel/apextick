@@ -168,5 +168,26 @@ q("DELETE FROM futures_trades", commit=True); q("DELETE FROM spot_trades", commi
 empty = client.get("/api/performance").get_json()
 check("performance: empty history does not crash", empty["futures"] == {"trades": 0} and empty["spot"] == {"trades": 0})
 
+# ---------------- powder-keg only returns ACTIVE pairs
+q("INSERT OR REPLACE INTO trading_pairs (pair,status,futures_supported,last_price,oi_spot_ratio,change_24h_pct,updated_at) VALUES ('ACT/USDT','ACTIVE',1,10,8.0,2.0,?)", (iso,), commit=True)
+q("INSERT OR REPLACE INTO trading_pairs (pair,status,futures_supported,last_price,oi_spot_ratio,change_24h_pct,updated_at) VALUES ('DEAD/USDT','INACTIVE',1,10,99.0,2.0,?)", (iso,), commit=True)
+pk = [p["pair"] for p in client.get("/api/market/powder-keg").get_json()]
+check("powder-keg excludes INACTIVE pairs", "ACT/USDT" in pk and "DEAD/USDT" not in pk, str(pk))
+
+# ---------------- /api/status and /api/btc-sentiment expose market state + bot state + 1h EMA trend
+import time as _time
+_now_ms = int(_time.time() * 1000)
+MARKET_STATE["klines_1h"] = [
+    {"t": _now_ms - (24 - i) * 3600_000, "o": 100.0, "h": 101.2, "l": 98.8, "c": 100.0 + (1.0 if i % 2 == 0 else -1.0), "v": 1000.0}
+    for i in range(25)
+]
+st2 = client.get("/api/status").get_json()
+check("status exposes btc_ema_trend, btc_market_state, futures_bot_state (CAUTION in CHOP)",
+      {"btc_ema_trend", "btc_market_state", "futures_bot_state", "futures_bot_reason", "futures_risk_multiplier", "futures_max_positions"} <= set(st2)
+      and st2["btc_market_state"] == "CHOP" and st2["futures_bot_state"] == "CAUTION",
+      str({k: st2.get(k) for k in ("btc_ema_trend", "btc_market_state", "futures_bot_state")}))
+sent = client.get("/api/btc-sentiment").get_json()
+check("btc-sentiment exposes ema_trend and market_state", "ema_trend" in sent and sent.get("market_state") == "CHOP", str(sent))
+
 print("\nFAILED:", fails if fails else "none")
 sys.exit(1 if fails else 0)
