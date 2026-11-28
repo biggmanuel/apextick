@@ -111,4 +111,25 @@ check("open interest is cached between scans", fut.calls == calls_first and call
 aaa = q("SELECT oi_usd, oi_spot_ratio FROM trading_pairs WHERE pair='AAA/USDT'", fetch_one=True)
 check("oi ratio = OI / 24h volume", abs(aaa["oi_spot_ratio"] - 5e6 / 4e8) < 1e-9, str(aaa))
 
+# ---------------- miniTicker parser & port-443 WS endpoint list
+mini = [
+    {"s": "BTCUSDT", "c": "105.0", "o": "100.0"},
+    {"s": "ETHUSDT", "c": "2000.0", "P": "-2.5"},
+    {"s": "ETHBTC", "c": "0.05", "o": "0.05"},
+    {"s": "BADUSDT", "c": "0", "o": "10"},
+]
+parsed = dict((p, (c, chg)) for p, c, chg in B._parse_ticker_payload(mini))
+check("miniTicker computes 24h % from c and o, keeps legacy P, skips non-USDT/zero",
+      "BTC/USDT" in parsed and abs(parsed["BTC/USDT"][1] - 5.0) < 1e-6
+      and "ETH/USDT" in parsed and abs(parsed["ETH/USDT"][1] - (-2.5)) < 1e-6
+      and "ETH/BTC" not in parsed and "BAD/USDT" not in parsed, str(parsed))
+
+os.environ.pop("BINANCE_WS_BASE", None)
+urls = B._get_ws_urls("/ws/!miniTicker@arr")
+check("default WS endpoints use port 443 vision + binance fallback",
+      len(urls) == 2 and urls[0] == "wss://data-stream.binance.vision/ws/!miniTicker@arr" and urls[1] == "wss://stream.binance.com:443/ws/!miniTicker@arr", str(urls))
+os.environ["BINANCE_WS_BASE"] = "wss://custom.example.com/"
+check("BINANCE_WS_BASE env override respected", B._get_ws_urls("/ws/!miniTicker@arr") == ["wss://custom.example.com/ws/!miniTicker@arr"])
+os.environ.pop("BINANCE_WS_BASE")
+
 print("\nFAILED:", fails if fails else "none"); sys.exit(1 if fails else 0)

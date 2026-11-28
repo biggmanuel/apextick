@@ -11,8 +11,9 @@ let state;
 function resetState() {
   state = {
     status: { status: 'RUNNING', api_ok: true, btc_gate_allowed: false, btc_gate_reason: 'Sell pressure (73%) exceeds maximum', ws_connected: true,
-              execution_mode: 'PAPER TRADING', macro_regime: 'TRENDING', btc_gate_override: true, macro_halt: false, prices_age_seconds: 2.0 },
-    sent: { sentiment: 'NEUTRAL', trend: 'BULLISH', atr: '611.32', change_24h: '+1.00%', buy_pressure: '26.0%', sell_pressure: '74.0%' },
+              execution_mode: 'PAPER TRADING', macro_regime: 'TRENDING', btc_gate_override: true, macro_halt: false, prices_age_seconds: 2.0,
+              btc_ema_trend: 'BEARISH', btc_market_state: 'TREND', futures_bot_state: 'NORMAL', futures_bot_reason: 'Normal operation' },
+    sent: { sentiment: 'NEUTRAL', trend: 'BULLISH', ema_trend: 'BEARISH', market_state: 'TREND', atr: '611.32', change_24h: '+1.00%', buy_pressure: '26.0%', sell_pressure: '74.0%' },
     spot: { total_profit: 7.26, win_rate: '95.00%', open_positions: 1, portfolio_value: 120.5, cash_balance: 100.0, unrealized_pnl: -3.75 },
     fut: { completed_trades: 5, win_rate: '40.00%', net_pnl: -7.66, portfolio_value: 99.0, cash_balance: 90.0, unrealized_pnl: 5.2, open_positions: 3 },
     pos: [
@@ -98,9 +99,20 @@ const text = (dom, id) => dom.window.document.getElementById(id).textContent;
   check('spot performance: 100% wins, infinite profit factor, W5, no losing streak', ps.includes('100.0%') && ps.includes('\u221e') && ps.includes('W5') && ps.includes('none'), ps.slice(0, 140));
   check('range label shows the first and last close', d.getElementById('perf-fut-range').textContent === '11-21 04:12 \u2192 11-22 09:50 UTC');
   check('SMC / powder widgets render', d.getElementById('smc-tbody').textContent.includes('ZZZ/USDT') && d.getElementById('powder-tbody').textContent.includes('6.20x'));
+  check('macro widget shows 1h EMA trend and market state separately from 24h trend', text(dom, 'btc-trend') === 'BULLISH' && text(dom, 'btc-ema-trend') === 'BEARISH' && text(dom, 'btc-market-state') === 'TREND');
+  check('bot state badge shows BOT: NORMAL', text(dom, 'bot-state-status') === 'BOT: NORMAL' && d.getElementById('bot-state-status').className.includes('online'));
   dom.window.close();
 
   // ================= status variants
+  dom = await boot((s) => { s.status.futures_bot_state = 'PROBATION'; s.status.futures_bot_reason = 'Loss streak L3 >= 3'; s.status.btc_market_state = 'CHOP'; });
+  d = dom.window.document;
+  check('PROBATION badge and danger banner render clearly', text(dom, 'bot-state-status') === 'BOT: PROBATION' && d.getElementById('bot-state-status').className.includes('offline') && [...d.querySelectorAll('#banners .banner.danger')].some((b) => b.textContent.includes('FUTURES PROBATION')));
+  dom.window.close();
+
+  dom = await boot((s) => { s.status.futures_bot_state = 'CAUTION'; s.status.futures_bot_reason = 'BTC CHOP (ER=0.14)'; s.status.btc_market_state = 'CHOP'; });
+  d = dom.window.document;
+  check('CAUTION badge and warn banner render clearly', text(dom, 'bot-state-status') === 'BOT: CAUTION' && d.getElementById('bot-state-status').className.includes('stale') && [...d.querySelectorAll('#banners .banner.warn')].some((b) => b.textContent.includes('FUTURES CAUTION')));
+  dom.window.close();
   dom = await boot((s) => { s.status.ws_connected = false; s.status.macro_halt = true; s.status.status = 'HALTED'; s.status.prices_age_seconds = 45; });
   d = dom.window.document;
   check('WS down shows REST fallback + red badge', text(dom, 'ws-status').includes('REST FALLBACK') && d.getElementById('ws-status').className.includes('offline'));

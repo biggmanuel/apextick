@@ -483,9 +483,54 @@ def _rest_price_refresh(rest_exchange) -> bool:
         pass
     return bool(rows)
 
+DEFAULT_WS_BASES = (
+    "wss://data-stream.binance.vision",
+    "wss://stream.binance.com:443",
+)
+
+def _get_ws_urls(path: str) -> list[str]:
+    """Builds ordered WebSocket endpoint URLs (env override first, then port-443 fallbacks)."""
+    override = os.getenv("BINANCE_WS_BASE", "").strip().rstrip("/")
+    bases = [override] if override else list(DEFAULT_WS_BASES)
+    return [f"{b}{path}" for b in bases]
+
+def _parse_ticker_payload(items) -> list[tuple[str, float, float]]:
+    """
+    Parses Binance !miniTicker@arr (or legacy !ticker@arr) payloads into [(pair, last_price, change_24h_pct)].
+    Mini-tickers are ~4x smaller and carry 'c' (close) and 'o' (24h open) instead of 'P'.
+    """
+    out = []
+    if not isinstance(items, list):
+        return out
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        sym = str(item.get("s") or "")
+        if not sym.endswith("USDT") or len(sym) <= 4:
+            continue
+        try:
+            close_p = float(item.get("c") or 0.0)
+        except Exception:
+            continue
+        if close_p <= 0:
+            continue
+        if "P" in item and item["P"] is not None:
+            try:
+                chg_pct = float(item["P"])
+            except Exception:
+                chg_pct = 0.0
+        else:
+            try:
+                open_p = float(item.get("o") or 0.0)
+                chg_pct = ((close_p - open_p) / open_p * 100.0) if open_p > 0 else 0.0
+            except Exception:
+                chg_pct = 0.0
+        out.append((f"{sym[:-4]}/USDT", close_p, chg_pct))
+    return out
+
 def start_btc_stream_background():
-    stream_btc = "wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade/btcusdt@kline_1h"
-    stream_all = "wss://stream.binance.com:9443/ws/!ticker@arr"
+    btc_urls = _get_ws_urls("/stream?streams=btcusdt@aggTrade/btcusdt@kline_1h")
+    ticker_urls = _get_ws_urls("/ws/!miniTicker@arr")
 
     def on_btc_message(ws, message):
         try:
@@ -505,20 +550,20 @@ def start_btc_stream_background():
     def on_ticker_message(ws, message):
         try:
             data = json.loads(message)
+            parsed = _parse_ticker_payload(data)
+            if not parsed:
+                return
             now = time.time()
             MARKET_STATE["ticker_ts"] = now
             MARKET_STATE["prices_ts"] = now
             MARKET_STATE["ws_connected"] = True
-            for item in data:
-                sym = item.get("s", "")
-                if sym.endswith("USDT"):
-                    pair = f"{sym[:-4]}/USDT"
-                    MARKET_STATE["live_prices"][pair] = float(item.get("c", 0))
-                    MARKET_STATE["live_changes"][pair] = float(item.get("P", 0))
+            for pair, last_p, chg_pct in parsed:
+                MARKET_STATE["live_prices"][pair] = last_p
+                MARKET_STATE["live_changes"][pair] = chg_pct
         except Exception as e:
             _log_throttled("ticker_msg", "WARNING", "apextick_bot", f"Ticker stream message error: {e}")
 
-    def run_stream(name, url, on_message, is_ticker):
+    def run_stream(name, urls, on_message, is_ticker):
         def on_error(ws, error):
             _log_throttled(f"ws_err_{name}", "ERROR", "apextick_bot", f"WebSocket '{name}' error: {error}")
         def on_close(ws, code, msg):
@@ -526,15 +571,19 @@ def start_btc_stream_background():
                 MARKET_STATE["ws_connected"] = False   # lets the REST fallback take over immediately
             _log_throttled(f"ws_close_{name}", "WARNING", "apextick_bot", f"WebSocket '{name}' closed ({code}). Reconnecting.")
         backoff = 5
+        url_idx = 0
         while True:
             started = time.time()
+            url = urls[url_idx % len(urls)]
             try:
                 ws = websocket.WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close)
-                ws.run_forever(ping_interval=20, ping_timeout=10, sslopt=_ssl_options())
+                ws.run_forever(ping_interval=60, ping_timeout=30, sslopt=_ssl_options())
             except Exception as e:
                 _log_throttled(f"ws_exc_{name}", "ERROR", "apextick_bot", f"WebSocket '{name}' crashed: {e}")
             if is_ticker:
                 MARKET_STATE["ws_connected"] = False
+            if (time.time() - started) <= 60:
+                url_idx += 1   # Rotate to fallback endpoint on rapid drop
             backoff = 5 if (time.time() - started) > 60 else min(backoff * 2, 60)
             time.sleep(backoff)
 
@@ -586,8 +635,8 @@ def start_btc_stream_background():
             cycle += 1
             time.sleep(interval)
 
-    threading.Thread(target=run_stream, args=("btc", stream_btc, on_btc_message, False), daemon=True).start()
-    threading.Thread(target=run_stream, args=("ticker", stream_all, on_ticker_message, True), daemon=True).start()
+    threading.Thread(target=run_stream, args=("btc", btc_urls, on_btc_message, False), daemon=True).start()
+    threading.Thread(target=run_stream, args=("ticker", ticker_urls, on_ticker_message, True), daemon=True).start()
     threading.Thread(target=db_price_sync_loop, daemon=True).start()
     threading.Thread(target=dynamic_scanner_loop, daemon=True).start()
 

@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import time
@@ -698,17 +699,28 @@ def run_futures_engine_tick() -> str:
                     continue
             
             entry_fill = _paper_fill(current_price, is_buy=(target_direction == "LONG")) if is_paper else current_price
+            entry_context = json.dumps({
+                "btc_ema_trend": btc_trend,
+                "btc_market_state": bot_state["market_state"],
+                "btc_efficiency_ratio": bot_state["efficiency_ratio"],
+                "bot_state": bot_state["state"],
+                "risk_multiplier": bot_state["risk_multiplier"],
+                "stop_pct": round(stop_fraction * 100.0, 3),
+                "buy_pressure_pct": round(buy_pressure, 1),
+                "open_slots_before": len(open_positions),
+                "pair_atr": round(atr, 6),
+            }, separators=(",", ":"))
 
             execute_query(
                 """
                 INSERT INTO futures_trades (
                     account_id, pair, trade_mode, direction, status, entry_price, 
                     margin_usdt, remaining_margin_usdt, notional_usdt, leverage,
-                    ob_edge_price, current_sl, dynamic_tp1, watermark_price, opened_at, pnl_usdt
-                ) VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ob_edge_price, current_sl, dynamic_tp1, watermark_price, opened_at, pnl_usdt, entry_context
+                ) VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (acct_id, pair, CURRENT_MODE, target_direction, entry_fill, margin_usdt, margin_usdt, notional_value, FUTURES_CONFIG["leverage"], 
-                 ob_edge_price, ob_edge_price, dynamic_tp1, entry_fill, now_str, -entry_fee), 
+                 ob_edge_price, ob_edge_price, dynamic_tp1, entry_fill, now_str, -entry_fee, entry_context), 
                 commit=True
             )
             

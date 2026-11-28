@@ -134,6 +134,10 @@ F.run_futures_engine_tick()
 pt = q("SELECT * FROM futures_trades WHERE pair='PRB1/USDT' AND status='OPEN'", fetch_one=True)
 exp_prob_margin = max(F.FUTURES_CONFIG["min_margin_usdt"], (0.50 * 0.25) / (15 * (0.01 + 2.0 * 0.0005)))
 check("probation entry uses 25% risk sizing", pt is not None and abs(pt["margin_usdt"] - exp_prob_margin) < 1e-6, f"{pt and pt['margin_usdt']}")
+import json as _json
+ctx = _json.loads(pt["entry_context"]) if (pt and pt.get("entry_context")) else {}
+check("entry_context JSON logged with bot_state, market_state, and stop_pct",
+      ctx.get("bot_state") == "PROBATION" and ctx.get("btc_ema_trend") == "BULLISH" and abs(ctx.get("stop_pct", 0) - 1.0) < 0.01, str(ctx))
 
 # Fill up to probation_max_positions (2) and verify a 3rd slot is blocked
 q("""INSERT INTO futures_trades (account_id,pair,trade_mode,direction,status,entry_price,margin_usdt,remaining_margin_usdt,notional_usdt,leverage,opened_at)
