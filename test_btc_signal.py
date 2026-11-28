@@ -87,8 +87,8 @@ class FakeFut:
     def __init__(self): self.calls = 0
     def fetch_open_interest(self, sym): self.calls += 1; return {"openInterestValue": 5_000_000.0}
 mk = lambda base: {"base": base, "quote": "USDT", "active": True, "spot": True}
-markets = {f"{b}/USDT": mk(b) for b in ("BTC", "ETH", "AAA", "JUP", "BTCUP", "SOXLB", "LOW", "HELD", "USDC")}
-vol = {"BTC": 9e9, "ETH": 5e9, "AAA": 4e8, "JUP": 3e8, "BTCUP": 9e8, "SOXLB": 9e8, "LOW": 1e6, "HELD": 1e6, "USDC": 9e9}
+markets = {f"{b}/USDT": mk(b) for b in ("BTC", "ETH", "AAA", "JUP", "BTCUP", "SOXLB", "COINB", "NBISB", "GOOGLB", "SOXSB", "LOW", "HELD", "USDC")}
+vol = {"BTC": 9e9, "ETH": 5e9, "AAA": 4e8, "JUP": 3e8, "BTCUP": 9e8, "SOXLB": 9e8, "COINB": 9e8, "NBISB": 9e8, "GOOGLB": 9e8, "SOXSB": 9e8, "LOW": 1e6, "HELD": 1e6, "USDC": 9e9}
 tickers = {f"{b}/USDT": {"last": 10.0, "percentage": 1.5, "quoteVolume": v} for b, v in vol.items()}
 tickers["BTC/USDT"]["last"] = 91000.0; tickers["BTC/USDT"]["percentage"] = -2.0
 fut = FakeFut(); fut_markets = {"AAA/USDT:USDT": {}, "ETH/USDT:USDT": {}}
@@ -100,8 +100,8 @@ q("INSERT INTO futures_trades (account_id,pair,trade_mode,direction,status,entry
 n = B.sync_binance_pairs()
 active = {r["pair"] for r in q("SELECT pair FROM trading_pairs WHERE status='ACTIVE'", fetch_all=True)}
 check("hot list = liquid coins only (AAA, JUP, ETH)", {"AAA/USDT", "JUP/USDT", "ETH/USDT"} <= active and n == 3, f"n={n}")
-check("JUP kept (not mistaken for a leveraged token), BTCUP/stablecoin/tokenized stock excluded",
-      "JUP/USDT" in active and not ({"BTCUP/USDT", "SOXLB/USDT", "USDC/USDT", "LOW/USDT"} & active))
+check("JUP kept (not mistaken for a leveraged token), BTCUP/stablecoin/tokenized stocks excluded",
+      "JUP/USDT" in active and not ({"BTCUP/USDT", "SOXLB/USDT", "COINB/USDT", "NBISB/USDT", "GOOGLB/USDT", "SOXSB/USDT", "USDC/USDT", "LOW/USDT"} & active))
 check("pair that dropped out of the list is deactivated", q("SELECT status s FROM trading_pairs WHERE pair='OLD/USDT'", fetch_one=True)["s"] == "INACTIVE")
 check("pair with an OPEN position stays ACTIVE (keeps getting prices)", "HELD/USDT" in active)
 check("BTC trend tracked from the scan", MS["btc_trend"] == "BEARISH" and MS["btc_price"] == 91000.0)

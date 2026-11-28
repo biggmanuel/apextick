@@ -5,7 +5,7 @@ import ccxt
 
 # IMPORT THE NEW CONFIG DICTIONARIES
 from config import SPOT_CONFIG, DYNAMIC_RISK_CONFIG, BINANCE_API_KEY, BINANCE_SECRET_KEY
-from database import execute_query, add_log
+from database import execute_query, execute_update_rowcount, add_log
 from btc_decline_signal import is_trading_allowed_by_btc_gate, get_fresh_price, MARKET_STATE
 
 # =============================================================================
@@ -26,7 +26,9 @@ SPOT_ENTRY_COOLDOWN_SECONDS = 180  # 3-minute cooldown between spot entries
 STALE_PRICE_THRESHOLD_SECONDS = 300
 
 MIN_TP_PCT = SPOT_CONFIG.get("min_tp_pct", 1.2)
+MAX_TP_PCT = SPOT_CONFIG.get("max_tp_pct", 8.0)
 MAX_DRAWDOWN_PCT = SPOT_CONFIG.get("max_drawdown_pct", 12.0)
+PAUSE_ON_BTC_RANGING = bool(SPOT_CONFIG.get("pause_on_btc_ranging", False))
 PAIR_COOLDOWN_AFTER_LOSS_SECONDS = SPOT_CONFIG.get("pair_cooldown_after_loss_seconds", 14400)
 SKIP_LOG_INTERVAL_SECONDS = SPOT_CONFIG.get("skip_log_interval_seconds", 300)
 
@@ -154,6 +156,19 @@ def check_smc_accumulation_zone(pair: str, current_price: float) -> tuple[bool, 
     except Exception as e:
         return False, f"db_error: {e}", 0.0
 
+def _compute_spot_tp(entry_price: float, ob_edge_price: float) -> float:
+    risk_distance = max(0.0, entry_price - ob_edge_price)
+    rr_multiplier = SPOT_CONFIG["risk_reward_multiplier"]
+    tp = max(entry_price + (risk_distance * rr_multiplier), entry_price * (1.0 + MIN_TP_PCT / 100.0))
+    if MAX_TP_PCT > 0:
+        tp = min(tp, entry_price * (1.0 + MAX_TP_PCT / 100.0))
+    return tp
+
+def _compute_spot_sl(entry_price: float) -> float:
+    if MAX_DRAWDOWN_PCT > 0:
+        return entry_price * (1.0 - MAX_DRAWDOWN_PCT / 100.0)
+    return 0.0
+
 def _live_sell(pair: str, qty: float):
     """LIVE market sell on the SPOT client. Fees on spot buys are taken in the base coin, so never sell more than we hold."""
     symbol = pair.replace("/", "")
@@ -219,6 +234,7 @@ def run_spot_scalper_tick() -> str:
 
             tp1_hit = int(trade.get("tp1_hit") or 0)
             dynamic_tp1 = float(trade.get("dynamic_tp1") or 0.0)
+            current_sl = float(trade.get("current_sl") or 0.0)
             watermark_price = float(trade.get("watermark_price") or entry_price)
 
             if current_price > watermark_price:
@@ -227,9 +243,12 @@ def run_spot_scalper_tick() -> str:
 
             # --- DECIDE WHETHER TO EXIT ---
             close_reason = ""
+            hit_sl = (current_sl > 0 and current_price <= current_sl) or (
+                current_sl <= 0 and MAX_DRAWDOWN_PCT > 0 and profit_pct <= -MAX_DRAWDOWN_PCT
+            )
             if is_halted:
                 close_reason = "MACRO HALT (Flattened)"
-            elif MAX_DRAWDOWN_PCT > 0 and profit_pct <= -MAX_DRAWDOWN_PCT:
+            elif hit_sl:
                 close_reason = f"DRAWDOWN STOP (-{MAX_DRAWDOWN_PCT:g}%)"
             elif current_price >= dynamic_tp1 and not tp1_hit:
                 close_reason = "TP SECURED (100% Bag Locked)"
@@ -249,13 +268,15 @@ def run_spot_scalper_tick() -> str:
             net_profit = (sell_notional - (rem_qty * entry_price)) - fee_usdt
             final_pnl = accumulated_profit + net_profit
 
-            execute_query(
+            updated = execute_update_rowcount(
                 """
                 UPDATE spot_trades
                 SET status = 'CLOSED', exit_price = ?, remaining_qty = 0, profit_usdt = ?, profit_pct = ?, closed_at = ?
-                WHERE id = ?
-                """, (current_price, final_pnl, profit_pct, now_str, trade_id), commit=True
+                WHERE id = ? AND status = 'OPEN'
+                """, (current_price, final_pnl, profit_pct, now_str, trade_id)
             )
+            if updated == 0:
+                continue
             execute_query("UPDATE accounts SET spot_balance_usdt = spot_balance_usdt + ? WHERE account_id = ?",
                           (sell_notional - fee_usdt, acct_id), commit=True)
 
@@ -297,12 +318,13 @@ def run_spot_scalper_tick() -> str:
             _flush_skip_log()
             return " | ".join(activity_summary) if activity_summary else f"Spot paused: BTC Gate BLOCK ({gate_reason})"
 
-        row = execute_query("SELECT regime FROM market_regimes WHERE pair = 'BTC/USDT'", fetch_one=True)
-        btc_regime = row["regime"] if row else "TRENDING"
-        if btc_regime == "RANGING":
-            _note_skip("btc_ranging")
-            _flush_skip_log()
-            return " | ".join(activity_summary) if activity_summary else "Spot paused: BTC is currently RANGING."
+        if PAUSE_ON_BTC_RANGING:
+            row = execute_query("SELECT regime FROM market_regimes WHERE pair = 'BTC/USDT'", fetch_one=True)
+            btc_regime = row["regime"] if row else "TRENDING"
+            if btc_regime == "RANGING":
+                _note_skip("btc_ranging")
+                _flush_skip_log()
+                return " | ".join(activity_summary) if activity_summary else "Spot paused: BTC is currently RANGING."
 
     for acct in accounts:
         acct_id = acct["account_id"]
@@ -350,11 +372,10 @@ def run_spot_scalper_tick() -> str:
                 _note_skip("pair_loss_cooldown", pair)
                 continue
 
-            # --- TARGET MATH: R:R multiple of the distance to the zone edge, but never closer than MIN_TP_PCT ---
+            # --- TARGET & STOP MATH: clamped between MIN_TP_PCT and MAX_TP_PCT; drawdown stop stored in current_sl ---
             atr = float(p_info.get("atr") or 0.0)
-            risk_distance = current_price - ob_edge_price
-            rr_multiplier = SPOT_CONFIG["risk_reward_multiplier"]
-            dynamic_tp1 = max(current_price + (risk_distance * rr_multiplier), current_price * (1 + MIN_TP_PCT / 100.0))
+            dynamic_tp1 = _compute_spot_tp(current_price, ob_edge_price)
+            drawdown_sl = _compute_spot_sl(current_price)
 
             trade_usdt = get_dynamic_spot_margin(available_usdt, atr, current_price)
             qty = trade_usdt / current_price
@@ -368,8 +389,8 @@ def run_spot_scalper_tick() -> str:
                     current_price = float(order.get("average") or order.get("price") or current_price)
                     qty = float(order.get("filled") or qty)
                     trade_usdt = qty * current_price
-                    risk_distance = current_price - ob_edge_price
-                    dynamic_tp1 = max(current_price + (risk_distance * rr_multiplier), current_price * (1 + MIN_TP_PCT / 100.0))
+                    dynamic_tp1 = _compute_spot_tp(current_price, ob_edge_price)
+                    drawdown_sl = _compute_spot_sl(current_price)
                 except Exception as e:
                     add_log("ERROR", "api_execution", f"Failed LIVE ENTRY for {pair}: {e}")
                     continue
@@ -384,7 +405,7 @@ def run_spot_scalper_tick() -> str:
                 ) VALUES (?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (acct_id, pair, CURRENT_MODE, current_price, qty, qty, trade_usdt,
-                 ob_edge_price, 0.0, dynamic_tp1, current_price, now_str, -entry_fee), commit=True
+                 ob_edge_price, drawdown_sl, dynamic_tp1, current_price, now_str, -entry_fee), commit=True
             )
             execute_query("UPDATE accounts SET spot_balance_usdt = spot_balance_usdt - ? WHERE account_id = ?",
                           (trade_usdt + entry_fee, acct_id), commit=True)

@@ -57,7 +57,9 @@ SPOT_CONFIG = {
 
     # --- NEW: spot risk controls ---
     "min_tp_pct": 1.2,               # TP is never closer than 1.2% (a 0.2% round-trip fee eats tiny targets)
+    "max_tp_pct": 8.0,               # Cap TP at 8% so wide zones don't hold bags until they reverse into a stop
     "max_drawdown_pct": 12.0,        # Sell a bag that is 12% under water (0 = never, the old accumulator behaviour)
+    "pause_on_btc_ranging": False,   # Spot SMC demand-zone bounces hedge Futures in ranging/chop; set True to pause
     "pair_cooldown_after_loss_seconds": 14400,  # After a losing close, do not re-buy that coin for 4h
     "skip_log_interval_seconds": 300,
 }
@@ -168,5 +170,10 @@ MARKET_SCANNER_CONFIG = {
     "volume_spike_multiplier": 0.0,
 
     # Tokenized stocks / equity tokens (market hours, gaps, thin books). Add more tickers here.
-    "excluded_bases": ["SPCXB", "SOXLB", "NVDAB", "QQQB", "INTCB", "KORUB", "MUB", "SNXXB"],
+    "excluded_bases": [
+        "SPCXB", "SOXLB", "NVDAB", "QQQB", "INTCB", "KORUB", "MUB", "SNXXB",
+        "COINB", "NBISB", "GOOGLB", "SOXSB", "ANTB", "AAPLB", "AMZNB", "MSFTB",
+        "TSLAB", "METAB", "PLTRB", "MSTRB", "SPYB", "CRCLB", "HOODB", "AMDB",
+        "ORCLB", "NFLXB",
+    ],
 }
