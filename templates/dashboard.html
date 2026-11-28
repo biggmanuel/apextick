@@ -239,6 +239,17 @@
         .banked-sub { display: block; font-size: 0.68rem; color: var(--text-muted); margin-top: 2px; font-weight: 400; }
         .gate-reason { display: block; font-size: 0.7rem; color: var(--text-muted); margin-top: 8px; line-height: 1.3; word-break: break-word; }
         .badge.stale { background: rgba(251,191,36,0.1); color: #fbbf24; border: 1px solid #fbbf24; }
+
+        /* --- performance & streaks panel --- */
+        .perf-card { background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 12px; padding: 20px; }
+        .perf-title { font-size: 1rem; font-weight: 700; color: var(--text-primary); margin-bottom: 14px; display: flex; justify-content: space-between; align-items: baseline; }
+        .perf-title small { font-size: 0.7rem; font-weight: 400; color: var(--text-muted); }
+        .perf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(135px, 1fr)); gap: 10px; }
+        .perf-tile { background: rgba(255,255,255,0.02); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 10px 12px; }
+        .perf-tile.wide { grid-column: span 2; }
+        .perf-label { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
+        .perf-value { font-size: 1.15rem; font-weight: 700; font-family: var(--font-mono); margin-top: 2px; }
+        .perf-sub { font-size: 0.68rem; color: var(--text-muted); margin-top: 3px; line-height: 1.35; }
     </style>
 </head>
 <body>
@@ -377,6 +388,18 @@
                 <!-- Injected via JS -->
             </tbody>
         </table>
+    </div>
+
+    <!-- PERFORMANCE & STREAKS -->
+    <div class="widget-row" style="grid-template-columns: 1fr 1fr;">
+        <div class="perf-card">
+            <div class="perf-title">FUTURES PERFORMANCE <small id="perf-fut-range"></small></div>
+            <div class="perf-grid" id="perf-fut"><div style="color: var(--text-muted); font-size: 0.85rem;">Loading...</div></div>
+        </div>
+        <div class="perf-card">
+            <div class="perf-title">SPOT PERFORMANCE <small id="perf-spot-range"></small></div>
+            <div class="perf-grid" id="perf-spot"><div style="color: var(--text-muted); font-size: 0.85rem;">Loading...</div></div>
+        </div>
     </div>
 
     <!-- Split Trade History (Spot & Futures Side by Side) -->
@@ -817,6 +840,65 @@
             '<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">No closed spot trades yet.</td></tr>';
     }
 
+    // "2026-11-21T09:23:41+00:00" -> "11-21 09:23"
+    function shortTime(iso) {
+        const m = String(iso || '').match(/\d{4}-(\d{2}-\d{2})[T ](\d{2}:\d{2})/);
+        return m ? m[1] + ' ' + m[2] : '--';
+    }
+    function runText(run) {
+        if (!run) return 'none';
+        return shortTime(run.start) + ' \u2192 ' + shortTime(run.end) + ' UTC \u00b7 ' + signedUsd(num(run.net));
+    }
+    function holdText(min) {
+        if (min == null) return '--';
+        return min >= 120 ? (min / 60).toFixed(1) + ' h' : Math.round(min) + ' min';
+    }
+
+    function renderPerfCard(id, rangeId, p, isFut) {
+        const el = $(id);
+        if (!p || !p.trades) {
+            el.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem;">No closed trades yet.</div>';
+            setText(rangeId, '');
+            return;
+        }
+        setText(rangeId, shortTime(p.first_close) + ' \u2192 ' + shortTime(p.last_close) + ' UTC');
+        const tiles = [];
+        const add = (label, value, sub, cls, wide) => tiles.push(
+            '<div class="perf-tile' + (wide ? ' wide' : '') + '"><div class="perf-label">' + esc(label) + '</div>' +
+            '<div class="perf-value ' + esc(cls || '') + '">' + esc(value) + '</div>' +
+            (sub ? '<div class="perf-sub">' + esc(sub) + '</div>' : '') + '</div>');
+
+        add('Trades', p.trades, p.wins + ' W / ' + p.losses + ' L');
+        const be = p.breakeven_win_rate;
+        add('Win rate', num(p.win_rate).toFixed(1) + '%', be != null ? 'break-even needs ' + num(be).toFixed(1) + '%' : '', be != null ? (num(p.win_rate) >= num(be) ? 'text-profit' : 'text-loss') : '');
+        add('Net PnL', signedUsd(num(p.net_pnl)), '24h ' + signedUsd(num(p.pnl_24h)) + ' \u00b7 7d ' + signedUsd(num(p.pnl_7d)), colorClass(num(p.net_pnl)));
+        const pf = p.profit_factor;
+        add('Profit factor', pf != null ? num(pf).toFixed(2) : (num(p.gross_profit) > 0 ? '\u221e' : '--'), 'gross ' + signedUsd(num(p.gross_profit)) + ' / ' + signedUsd(num(p.gross_loss)), pf != null ? (num(pf) >= 1 ? 'text-profit' : 'text-loss') : 'text-profit');
+        add('Avg win', signedUsd(num(p.avg_win)), p.payoff_ratio != null ? 'payoff ' + num(p.payoff_ratio).toFixed(2) + ' : 1' : '', 'text-profit');
+        add('Avg loss', signedUsd(num(p.avg_loss)), '', 'text-loss');
+        add('Expectancy', signedUsd(num(p.expectancy)), 'per trade', colorClass(num(p.expectancy)));
+        add('Best trade', signedUsd(num(p.best_trade)), '', 'text-profit');
+        add('Worst trade', signedUsd(num(p.worst_trade)), '', 'text-loss');
+        add('Longest win streak', (p.longest_win_streak ? p.longest_win_streak.length : 0) + ' in a row', runText(p.longest_win_streak), 'text-profit', true);
+        add('Longest losing streak', (p.longest_loss_streak ? p.longest_loss_streak.length : 0) + ' in a row', runText(p.longest_loss_streak), 'text-loss', true);
+        const cs = p.current_streak || {};
+        add('Current streak', (cs.type || '-') + (cs.length || ''), cs.type === 'W' ? 'winning' : 'losing', cs.type === 'W' ? 'text-profit' : 'text-loss');
+        add('Avg hold', holdText(p.avg_hold_minutes), '');
+        if (isFut) {
+            add('TP1 reached', p.tp1_hits + ' / ' + p.trades, (p.tp1_hits / p.trades * 100).toFixed(0) + '% of trades');
+            add('Stop-outs', p.stop_outs, (p.stop_outs / p.trades * 100).toFixed(0) + '% of trades', 'text-loss');
+            const d = p.by_direction || {};
+            const part = (k) => d[k] ? k + ' ' + d[k].trades + ' \u00b7 ' + num(d[k].win_rate).toFixed(0) + '% \u00b7 ' + signedUsd(num(d[k].net_pnl)) : k + ' 0';
+            add('Long vs Short', '', part('LONG') + '\n' + part('SHORT'), '', true);
+        }
+        el.innerHTML = tiles.join('');
+    }
+
+    function renderPerformance(perf) {
+        renderPerfCard('perf-fut', 'perf-fut-range', perf.futures, true);
+        renderPerfCard('perf-spot', 'perf-spot-range', perf.spot, false);
+    }
+
     function renderLogs(logs) {
         const box = $('logs-box');
         const keep = box.scrollTop;
@@ -858,7 +940,7 @@
                 ['status', '/api/status'], ['sent', '/api/btc-sentiment'], ['spot', '/api/statistics'],
                 ['fut', '/api/futures/statistics'], ['pos', '/api/positions']
             ];
-            if (slow) jobs.push(['powder', '/api/market/powder-keg'], ['smc', '/api/market/smc-zones'], ['hist', '/api/trades']);
+            if (slow) jobs.push(['powder', '/api/market/powder-keg'], ['smc', '/api/market/smc-zones'], ['hist', '/api/trades'], ['perf', '/api/performance']);
             if (logs) jobs.push(['logs', '/api/logs']);
 
             const settled = await Promise.allSettled(jobs.map((j) => getJSON(j[1])));
@@ -873,6 +955,7 @@
             if (R.powder) safe(() => renderPowder(R.powder));
             if (R.smc) safe(() => renderSmc(R.smc));
             if (R.hist) safe(() => renderHistory(R.hist));
+            if (R.perf) safe(() => renderPerformance(R.perf));
             if (R.logs) safe(() => renderLogs(R.logs));
             if (R.status || R.pos) lastOk = Date.now();
         } catch (e) {

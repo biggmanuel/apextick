@@ -1,0 +1,33 @@
+# ApexTick - rules for AI assistants working in this repo
+(Read HANDOFF.md first: it has the architecture, accounting rules, history and open work.)
+
+## What this is
+Python/Flask crypto trading bot for Binance: spot "accumulator" + USDT-M futures "sniper", SMC (order-block / FVG) zone entries,
+BTC macro gate, macro-news kill switch, SQLite ledger, web dashboard. It runs in PAPER mode. LIVE trading is deliberately locked.
+
+## Hard rules
+1. Never enable or "fix toward" LIVE trading unless the user explicitly says so. Keep ALLOW_LIVE_TRADING gating, fail-safe mode flags
+   (LIVE only when paper_trading_enabled == "0"), and the ADMIN_KEY checks. LIVE order code is known-unsafe (see HANDOFF.md section 16).
+2. Safety principles: fail CLOSED on missing/stale data (BTC gate, prices), fail SAFE on settings (anything but an explicit value = PAPER).
+3. Never commit or print secrets or data: .env, apextick.db(-wal/-shm), API keys. Keep the repo private.
+4. SQL is always parameterised with "?" via database.execute_query / execute_batch. Balance changes are RELATIVE updates
+   ("x = x + ?"), never "x = <value read earlier>" (the dashboard and engines write concurrently).
+5. Do not change trading behaviour as a side effect of a UI/analysis task. Config changes go through config.py dicts.
+
+## Working agreement with the user
+- If the user says "brainstorm" / "discuss" / "explain": talk only, do NOT write or edit code. Ask before building.
+- Explain in plain language, give exact copy-paste commands (the user sometimes types Python at the bash prompt by mistake).
+- Deliver complete files plus tests. State plainly what changed and what did NOT change.
+- Be honest about uncertainty. Paper results are optimistic (no real fills); one market episode is not proof.
+
+## How to run / verify
+- Tests (each suite uses its own temp SQLite DB, no network): `python3 run_all_tests.py`   -> expect "ALL GOOD" (9 suites, 201 checks)
+- Dashboard UI test (jsdom): `cd tools && npm install && node ui_test.js`   -> expect "FAILED: none" (55 checks)
+- App: `python3 app.py` (needs .env; dashboard on :5000). DB: ./apextick.db (SQLite, WAL).
+- Test fixtures: set SQLITE_DB_PATH to a temp file BEFORE importing database; mark prices fresh with
+  MARKET_STATE["prices_ts"] = time.time() + 10**9; set futures_engine.PAPER_SLIPPAGE_PCT = 0.0 when asserting exact numbers.
+
+## Conventions
+- Engines run every 3s in threads started by app.py. Shared price/BTC state lives in btc_decline_signal.MARKET_STATE.
+- templates/dashboard.html uses CRLF line endings and is a Jinja template ({{ bot_name }}); escape all server data with esc() before innerHTML.
+- Add a test for every behaviour change; keep the existing suites green.

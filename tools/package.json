@@ -1,0 +1,1 @@
+{ "name": "apextick-dashboard-ui-test", "private": true, "description": "Simulated-browser (jsdom) test for templates/dashboard.html. Run: npm install && node ui_test.js", "dependencies": { "jsdom": "^26.0.0" } }
