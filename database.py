@@ -58,6 +58,19 @@ def execute_query(query: str, params: tuple = (), fetch_one: bool = False, fetch
     finally:
         conn.close()
 
+def execute_update_rowcount(query: str, params: tuple = ()) -> int:
+    """Runs a single UPDATE/DELETE in one commit and returns rows modified (for atomic status guards)."""
+    conn = get_connection()
+    try:
+        if IS_POSTGRES:
+            query = query.replace("?", "%s")
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()
+
 def execute_batch(statements) -> int:
     """
     Runs many (query, params) statements in ONE connection and ONE commit.

@@ -9,7 +9,7 @@ import ccxt
 from config import (FUTURES_CONFIG, MARKET_SCANNER_CONFIG, POWDER_KEG_CONFIG, 
                     DYNAMIC_RISK_CONFIG, BINANCE_API_KEY, BINANCE_SECRET_KEY, 
                     exchange as live_exchange)
-from database import execute_query, add_log
+from database import execute_query, execute_update_rowcount, add_log
 from btc_decline_signal import is_trading_allowed_by_btc_gate, get_fresh_price, MARKET_STATE
 
 # =============================================================================
@@ -19,15 +19,22 @@ FUTURES_ENTRY_COOLDOWN_SECONDS = 600  # Cooldown between new entries per account
 STALE_PRICE_THRESHOLD_SECONDS = 300   # Max allowed age for a fallback price
 
 # --- RISK CONTROLS (all tunable in config.py -> FUTURES_CONFIG; these are the fallbacks) ---
-MIN_STOP_PCT = FUTURES_CONFIG.get("min_stop_pct", 0.4)                  # stops tighter than this = noise
+MIN_STOP_PCT = FUTURES_CONFIG.get("min_stop_pct", 0.5)                  # stops tighter than this = noise
 MAX_STOP_PCT = FUTURES_CONFIG.get("max_stop_pct", 2.0)                  # stops wider than this = oversized loss
-RISK_PER_TRADE_USDT = FUTURES_CONFIG.get("risk_per_trade_usdt", 0.50)   # target loss if the stop is hit
+RISK_PER_TRADE_USDT = FUTURES_CONFIG.get("risk_per_trade_usdt", 0.50)   # target loss if the stop is hit (incl. fees/slippage)
 MAX_MARGIN_PCT_PER_TRADE = FUTURES_CONFIG.get("max_margin_pct_per_trade", 5.0)  # cap on margin vs balance
 PAIR_STOP_COOLDOWN_SECONDS = FUTURES_CONFIG.get("pair_stop_cooldown_seconds", 7200)   # after a stop-out
 PAIR_CLOSE_COOLDOWN_SECONDS = FUTURES_CONFIG.get("pair_close_cooldown_seconds", 1800) # after any other close
 MIN_VOLUME_24H_USD = FUTURES_CONFIG.get("min_volume_24h_usd", 20_000_000)
 SKIP_LOG_INTERVAL_SECONDS = FUTURES_CONFIG.get("skip_log_interval_seconds", 300)
 PAPER_SLIPPAGE_PCT = FUTURES_CONFIG.get("paper_slippage_pct", 0.02)   # paper fills are this much WORSE than the quote
+LIVE_SLIPPAGE_BUFFER_PCT = FUTURES_CONFIG.get("live_slippage_buffer_pct", 0.04)
+
+# --- SELF-AWARENESS: PROBATION CIRCUIT BREAKER ---
+PROBATION_LOSS_STREAK = FUTURES_CONFIG.get("probation_loss_streak", 3)
+PROBATION_RISK_MULTIPLIER = FUTURES_CONFIG.get("probation_risk_multiplier", 0.25)
+PROBATION_MAX_POSITIONS = FUTURES_CONFIG.get("probation_max_positions", 2)
+PROBATION_WINS_TO_RECOVER = FUTURES_CONFIG.get("probation_wins_to_recover", 1)
 
 def _paper_fill(price: float, is_buy: bool) -> float:
     """Paper-trading fill price: buys fill a little higher, sells a little lower (slippage)."""
@@ -37,7 +44,7 @@ def _paper_fill(price: float, is_buy: bool) -> float:
 # --- SKIP-REASON TRACKING (one summary log line per interval instead of per-tick spam) ---
 _SKIP_STATS = {}
 _LAST_SKIP_LOG = time.time()
-COUNT_ONLY_REASONS = {"no_zone_at_price", "account_cooldown", "max_positions", "low_margin", "btc_gate_block", "stale_prices", "live_locked"}
+COUNT_ONLY_REASONS = {"no_zone_at_price", "account_cooldown", "max_positions", "probation_max_positions", "low_margin", "btc_gate_block", "stale_prices", "live_locked"}
 
 def _note_skip(reason: str, pair: str):
     bucket = _SKIP_STATS.setdefault(reason, {})
@@ -146,6 +153,81 @@ def is_pair_on_cooldown(account_id: str, pair: str, mode: str) -> tuple[bool, in
     except Exception as e:
         add_log("WARNING", "futures_engine", f"Pair cooldown could not parse closed_at for {pair}: {e}")
     return False, 0, ""
+
+def get_futures_bot_state(account_id: str, mode: str) -> dict:
+    """
+    Self-awareness state machine for Futures entries.
+    Walks recent closed trades chronologically so state survives restarts cleanly:
+      - Enters PROBATION after PROBATION_LOSS_STREAK consecutive closed losses (pnl <= 0).
+      - Exits PROBATION after PROBATION_WINS_TO_RECOVER consecutive winning closes (pnl > 0).
+    """
+    normal_max = int(FUTURES_CONFIG.get("max_open_positions", 5))
+    trigger = int(PROBATION_LOSS_STREAK or 0)
+    wins_needed = max(1, int(PROBATION_WINS_TO_RECOVER or 1))
+    prob_mult = float(PROBATION_RISK_MULTIPLIER)
+    prob_max = max(1, min(int(PROBATION_MAX_POSITIONS), normal_max))
+
+    rows = execute_query(
+        """SELECT pnl_usdt FROM futures_trades
+           WHERE account_id = ? AND trade_mode = ? AND status = 'CLOSED'
+           ORDER BY closed_at DESC, id DESC LIMIT 50""",
+        (account_id, mode), fetch_all=True
+    ) or []
+
+    state = "NORMAL"
+    loss_streak = 0
+    recovery_wins = 0
+    for row in reversed(rows):
+        pnl = float(row.get("pnl_usdt") or 0.0)
+        if pnl > 0:
+            loss_streak = 0
+            if state == "PROBATION":
+                recovery_wins += 1
+                if recovery_wins >= wins_needed:
+                    state = "NORMAL"
+                    recovery_wins = 0
+        else:
+            loss_streak += 1
+            recovery_wins = 0
+            if trigger > 0 and loss_streak >= trigger:
+                state = "PROBATION"
+
+    if state == "PROBATION":
+        return {
+            "state": "PROBATION",
+            "loss_streak": loss_streak,
+            "recovery_wins": recovery_wins,
+            "risk_multiplier": prob_mult,
+            "max_positions": prob_max,
+            "reason": f"Loss streak L{loss_streak} >= {trigger} (risk {int(prob_mult * 100)}%, max {prob_max} slots)",
+        }
+
+    return {
+        "state": "NORMAL",
+        "loss_streak": loss_streak,
+        "recovery_wins": 0,
+        "risk_multiplier": 1.0,
+        "max_positions": normal_max,
+        "reason": "Normal operation",
+    }
+
+def calculate_futures_margin(
+    risk_usdt: float,
+    leverage: float,
+    stop_fraction: float,
+    fee_pct: float,
+    round_trip_slippage_pct: float,
+    min_margin: float,
+    max_margin: float,
+    available_margin: float,
+) -> float:
+    """
+    Sizes margin so a stop-out including round-trip fees and slippage lands near risk_usdt:
+        margin = risk_usdt / (leverage * (stop_fraction + 2 * fee_fraction + round_trip_slippage_fraction))
+    """
+    effective_stop_frac = stop_fraction + 2.0 * (fee_pct / 100.0) + (round_trip_slippage_pct / 100.0)
+    margin_by_risk = risk_usdt / (leverage * max(effective_stop_frac, 1e-9))
+    return max(min_margin, min(margin_by_risk, max_margin, available_margin))
 
 def get_dynamic_margin(available_margin: float, atr: float, current_price: float) -> float:
     """
@@ -310,16 +392,17 @@ def run_futures_engine_tick() -> str:
                 net_loss = gross_pnl - (notional_closed * (FUTURES_CONFIG["fee_pct"] / 100.0))
                 total_pnl = accumulated_pnl + net_loss          # keeps any TP1 profit already banked
 
-                execute_query(
+                changed = execute_update_rowcount(
                     """
                     UPDATE futures_trades
                     SET status = 'CLOSED', exit_price = ?, remaining_margin_usdt = 0.0,
                         pnl_usdt = ?, pnl_pct = ?, close_type = ?, closed_at = ?
-                    WHERE id = ?
+                    WHERE id = ? AND status = 'OPEN'
                     """,
-                    (exit_price, total_pnl, (total_pnl / orig_margin * 100.0) if orig_margin > 0 else 0.0, risk_exit_type, now_str, trade_id),
-                    commit=True
+                    (exit_price, total_pnl, (total_pnl / orig_margin * 100.0) if orig_margin > 0 else 0.0, risk_exit_type, now_str, trade_id)
                 )
+                if changed != 1:
+                    continue
 
                 execute_query("UPDATE accounts SET futures_balance_usdt = futures_balance_usdt + ? WHERE account_id = ?",
                               (max(0.0, rem_margin + net_loss), acct_id), commit=True)
@@ -386,26 +469,30 @@ def run_futures_engine_tick() -> str:
                 total_pnl_pct = ((accumulated_pnl + net_pnl) / orig_margin * 100.0) if orig_margin > 0 else 0.0   # return on ORIGINAL margin
 
                 if full_close:
-                    execute_query(
+                    changed = execute_update_rowcount(
                         """
                         UPDATE futures_trades
                         SET status = 'CLOSED', exit_price = ?, remaining_margin_usdt = 0.0,
                             pnl_usdt = ?, pnl_pct = ?, close_type = ?, closed_at = ?
-                        WHERE id = ?
+                        WHERE id = ? AND status = 'OPEN'
                         """,
-                        (exit_price, accumulated_pnl + net_pnl, total_pnl_pct, close_reason, now_str, trade_id), commit=True
+                        (exit_price, accumulated_pnl + net_pnl, total_pnl_pct, close_reason, now_str, trade_id)
                     )
+                    if changed != 1:
+                        continue
                     log_level = "SUCCESS" if (accumulated_pnl + net_pnl) > 0 else "WARNING"
                     msg = f"[{acct['display_name']}] {CURRENT_MODE} {close_reason}: {pair} {direction} closed. Final PnL: ${accumulated_pnl + net_pnl:+.2f}"
                 else: # TP1 Partial Close
-                    execute_query(
+                    changed = execute_update_rowcount(
                         """
                         UPDATE futures_trades 
                         SET remaining_margin_usdt = ?, pnl_usdt = ?, pnl_pct = ?, tp1_hit = 1, current_sl = ? 
-                        WHERE id = ?
+                        WHERE id = ? AND status = 'OPEN' AND tp1_hit = 0
                         """,
-                        (rem_margin - margin_to_close, accumulated_pnl + net_pnl, total_pnl_pct, entry_price, trade_id), commit=True
+                        (rem_margin - margin_to_close, accumulated_pnl + net_pnl, total_pnl_pct, entry_price, trade_id)
                     )
+                    if changed != 1:
+                        continue
                     msg = f"[{CURRENT_MODE}] {close_reason}: {pair} | Locked: +${net_pnl:.2f} | SL moved to Breakeven."
                     log_level = "SUCCESS"
                 
@@ -472,12 +559,13 @@ def run_futures_engine_tick() -> str:
             _note_skip("account_cooldown", "-")
             continue
 
+        bot_state = get_futures_bot_state(acct_id, CURRENT_MODE)
         open_positions = execute_query(
             "SELECT pair FROM futures_trades WHERE account_id = ? AND status = 'OPEN' AND trade_mode = ?",
             (acct_id, CURRENT_MODE), fetch_all=True
         )
-        if len(open_positions) >= FUTURES_CONFIG["max_open_positions"]:
-            _note_skip("max_positions", "-")
+        if len(open_positions) >= bot_state["max_positions"]:
+            _note_skip("probation_max_positions" if bot_state["state"] != "NORMAL" else "max_positions", "-")
             continue
         held_pairs = {p["pair"] for p in open_positions}
 
@@ -532,13 +620,21 @@ def run_futures_engine_tick() -> str:
                 dynamic_tp1 = current_price - (risk_distance * rr_multiplier)
 
 
-            # --- LAYER 5: DYNAMIC RISK ALLOCATION ---
-            # Size the position so that hitting the stop loses about RISK_PER_TRADE_USDT,
-            # whatever the stop distance:  margin = risk / (leverage * stop_fraction)
+            # --- LAYER 5: DYNAMIC RISK ALLOCATION (fee-, slippage-, and probation-aware) ---
             stop_fraction = risk_distance / current_price
-            margin_by_risk = RISK_PER_TRADE_USDT / (FUTURES_CONFIG["leverage"] * stop_fraction)
+            effective_risk = RISK_PER_TRADE_USDT * bot_state["risk_multiplier"]
+            rt_slip_pct = (2.0 * PAPER_SLIPPAGE_PCT) if is_paper else LIVE_SLIPPAGE_BUFFER_PCT
             max_margin = available_margin * (MAX_MARGIN_PCT_PER_TRADE / 100.0)
-            margin_usdt = max(FUTURES_CONFIG["min_margin_usdt"], min(margin_by_risk, max_margin, available_margin))
+            margin_usdt = calculate_futures_margin(
+                risk_usdt=effective_risk,
+                leverage=FUTURES_CONFIG["leverage"],
+                stop_fraction=stop_fraction,
+                fee_pct=FUTURES_CONFIG["fee_pct"],
+                round_trip_slippage_pct=rt_slip_pct,
+                min_margin=FUTURES_CONFIG["min_margin_usdt"],
+                max_margin=max_margin,
+                available_margin=available_margin,
+            )
 
             notional_value = margin_usdt * FUTURES_CONFIG["leverage"]
             entry_fee = notional_value * (FUTURES_CONFIG["fee_pct"] / 100.0)
@@ -577,7 +673,8 @@ def run_futures_engine_tick() -> str:
             
             execute_query("UPDATE accounts SET futures_balance_usdt = futures_balance_usdt - ? WHERE account_id = ?", (margin_usdt + entry_fee, acct_id), commit=True)
             
-            msg = f"[{fresh_acct['display_name']}] {CURRENT_MODE} ENTRY: {target_direction} on {pair} at ${entry_fill:,.4f} (Margin: ${margin_usdt:.2f} @ {FUTURES_CONFIG['leverage']}x | Risk ~${margin_usdt * FUTURES_CONFIG['leverage'] * stop_fraction:.2f} | Entry fee ${entry_fee:.3f})\n🎯 Risk/Reward Locked: SL @ ${ob_edge_price:.4f} ({stop_fraction*100:.2f}% away) | TP1 @ ${dynamic_tp1:.4f}\n🧠 Trigger: {entry_reason}"
+            state_note = f" | State: {bot_state['state']} ({int(bot_state['risk_multiplier']*100)}%)" if bot_state["state"] != "NORMAL" else ""
+            msg = f"[{fresh_acct['display_name']}] {CURRENT_MODE} ENTRY: {target_direction} on {pair} at ${entry_fill:,.4f} (Margin: ${margin_usdt:.2f} @ {FUTURES_CONFIG['leverage']}x | Target risk ~${effective_risk:.2f} | Entry fee ${entry_fee:.3f}{state_note})\n🎯 Risk/Reward Locked: SL @ ${ob_edge_price:.4f} ({stop_fraction*100:.2f}% away) | TP1 @ ${dynamic_tp1:.4f}\n🧠 Trigger: {entry_reason}"
             add_log("INFO", "apextick_bot", msg)
             activity_summary.append(msg)
             break 

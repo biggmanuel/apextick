@@ -79,15 +79,22 @@ FUTURES_CONFIG = {
     "trailing_buffer_pct": 1.5,      # Runner trails the peak by 1.5% (was 3.0 = ~45% of margin at 15x)
 
     # --- NEW: risk controls ---
-    "min_stop_pct": 0.4,             # Skip trades whose stop is closer than this (noise stop-outs, pennies of profit)
+    "min_stop_pct": 0.5,             # Skip trades whose stop is closer than this (noise stop-outs, pennies of profit)
     "max_stop_pct": 2.0,             # Skip trades whose stop is further than this (at 15x, 2% = 30% of margin)
-    "risk_per_trade_usdt": 0.50,     # Target loss if the stop is hit; margin is sized from this
+    "risk_per_trade_usdt": 0.50,     # Target loss if the stop is hit (including round-trip fees & slippage)
     "max_margin_pct_per_trade": 5.0, # Never put more than 5% of balance into one trade's margin
     "pair_stop_cooldown_seconds": 7200,   # After a stop-out, don't re-enter that pair for 2h
     "pair_close_cooldown_seconds": 1800,  # After any other close, wait 30 min on that pair
     "min_volume_24h_usd": 20_000_000,     # Skip thin coins (BREV/MMT-style gaps)
     "skip_log_interval_seconds": 300,     # One "why entries were skipped" summary per 5 min
     "paper_slippage_pct": 0.02,           # Paper fills are 0.02% worse than the quote (entry and every exit)
+    "live_slippage_buffer_pct": 0.04,     # Round-trip slippage buffer used when sizing LIVE trades
+
+    # --- SELF-AWARENESS: probation circuit breaker ---
+    "probation_loss_streak": 3,           # Consecutive closed losses before entering PROBATION (0 = disabled)
+    "probation_risk_multiplier": 0.25,    # Risk multiplier during PROBATION ($0.50 -> $0.125)
+    "probation_max_positions": 2,         # Max simultaneous open futures slots during PROBATION
+    "probation_wins_to_recover": 1,       # Consecutive winning closes required to exit PROBATION
 }
 
 # --- DYNAMIC RISK MANAGEMENT (ATR SIZING) ---
