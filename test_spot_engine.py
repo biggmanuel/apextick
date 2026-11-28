@@ -41,7 +41,7 @@ check("entry taken", t is not None and t["pair"] == "SPT/USDT")
 check("tiny stop (0.1%) -> TP lifted to the 1.2% minimum (101.2), not 100.3", abs(t["dynamic_tp1"] - 101.2) < 1e-9, f"{t['dynamic_tp1']}")
 check("entry fee booked on the trade", abs(t["profit_usdt"] + 18 * 0.001) < 1e-9, f"{t['profit_usdt']}")
 check("balance fell by cost + fee", abs((b0 - cash()) - (18 + 0.018)) < 1e-9, f"{b0 - cash():.4f}")
-check("no drawdown stop price stored, SL stays 0 (stop is rule-based)", t["current_sl"] == 0.0)
+check("drawdown stop price stored in current_sl (88.0 for -12%)", abs(t["current_sl"] - 88.0) < 1e-9, f"{t['current_sl']}")
 pair("EEE/USDT"); zone("EEE/USDT", 99.0, 101.0)
 S.run_spot_scalper_tick()
 check("3-minute account cooldown blocks a second entry", q("SELECT COUNT(*) c FROM spot_trades WHERE status='OPEN'", fetch_one=True)["c"] == 1)
@@ -100,5 +100,53 @@ setv("paper_trading_enabled", "1")
 S.SKIP_LOG_INTERVAL_SECONDS = 0; S._LAST_SKIP_LOG = 0
 q("DELETE FROM spot_trades", commit=True); S.run_spot_scalper_tick()
 check("skip summary line written", q("SELECT COUNT(*) c FROM logs WHERE source='spot_skips'", fetch_one=True)["c"] >= 1)
+
+# ---------------- max_tp_pct cap on wide zones
+q("DELETE FROM spot_trades", commit=True)
+q("DELETE FROM trading_pairs", commit=True)
+q("DELETE FROM liquidity_pools", commit=True)
+pair("WIDE/USDT", 100.0); zone("WIDE/USDT", 95.0, 101.0)  # 5% distance -> 3x = 15%, should cap at 8% (108.0)
+S.run_spot_scalper_tick()
+wt = q("SELECT * FROM spot_trades WHERE pair='WIDE/USDT' AND status='OPEN'", fetch_one=True)
+check("wide zone TP capped at max_tp_pct (108.0)", wt is not None and abs(wt["dynamic_tp1"] - 108.0) < 1e-9, f"{wt and wt['dynamic_tp1']}")
+check("wide zone entry stores current_sl=88.0", wt is not None and abs(wt["current_sl"] - 88.0) < 1e-9, f"{wt and wt['current_sl']}")
+
+# ---------------- stored current_sl triggers stop
+MS["live_prices"]["WIDE/USDT"] = 87.9
+S.run_spot_scalper_tick()
+wt_closed = q("SELECT status FROM spot_trades WHERE id=?", (wt["id"],), fetch_one=True)
+check("stored current_sl closes position when price drops below it", wt_closed["status"] == "CLOSED")
+
+# ---------------- atomic exit guard prevents double-credit
+q("DELETE FROM spot_trades", commit=True)
+q("DELETE FROM trading_pairs", commit=True)
+q("DELETE FROM liquidity_pools", commit=True)
+pair("SRACE/USDT", 85.0)
+rid = old_open("SRACE/USDT", entry=100.0, qty=0.18, tp=105.0)
+real_upd = S.execute_update_rowcount
+def force_close_spot_first(query, params=()):
+    q("UPDATE spot_trades SET status='CLOSED' WHERE id=?", (rid,), commit=True)
+    return real_upd(query, params)
+S.execute_update_rowcount = force_close_spot_first
+b_race = cash()
+S.run_spot_scalper_tick()
+S.execute_update_rowcount = real_upd
+check("spot atomic exit guard: already-closed trade credits $0", abs(cash() - b_race) < 1e-9, f"delta={cash()-b_race:.4f}")
+
+# ---------------- pause_on_btc_ranging flag (default False allows entries in RANGING)
+q("DELETE FROM spot_trades", commit=True)
+q("DELETE FROM trading_pairs", commit=True)
+q("DELETE FROM liquidity_pools", commit=True)
+setv("btc_gate_override", "0")
+q("INSERT OR REPLACE INTO market_regimes (pair, regime, volatility_state, updated_at) VALUES ('BTC/USDT', 'RANGING', 'LOW', ?)", (iso(NOW),), commit=True)
+MS["klines_1h"] = [{"t": int(time.time() * 1000) - (59 - i) * 3600_000, "o": 100.0, "h": 100.1, "l": 99.9, "c": 100.0, "v": 1000.0} for i in range(60)]
+MS["pressure_ts"] = time.time(); MS["buy_pressure_pct"] = 55.0; MS["sell_pressure_pct"] = 45.0
+pair("RNG/USDT", 100.0); zone("RNG/USDT", 99.0, 101.0)
+S.PAUSE_ON_BTC_RANGING = True
+msg_rng = S.run_spot_scalper_tick()
+check("pause_on_btc_ranging=True blocks entry in RANGING", "RANGING" in msg_rng and q("SELECT COUNT(*) c FROM spot_trades", fetch_one=True)["c"] == 0, msg_rng)
+S.PAUSE_ON_BTC_RANGING = False
+S.run_spot_scalper_tick()
+check("pause_on_btc_ranging=False allows entry in RANGING", q("SELECT COUNT(*) c FROM spot_trades WHERE pair='RNG/USDT'", fetch_one=True)["c"] == 1)
 
 print("\nFAILED:", fails if fails else "none"); sys.exit(1 if fails else 0)

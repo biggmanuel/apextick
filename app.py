@@ -17,8 +17,11 @@ from btc_decline_signal import (
 
 # Execution Engines
 from spot_engine import run_spot_scalper_tick
-from futures_engine import run_futures_engine_tick
-from grid_engine import GridEngine
+from futures_engine import (
+    run_futures_engine_tick,
+    calculate_futures_macro_trend,
+    get_futures_bot_state,
+)
 
 # Quantitative Brains
 from regime_manager import RegimeManager
@@ -87,10 +90,7 @@ def start_background_services():
     macro = MacroCalendar()
     threading.Thread(target=macro.monitor_loop, daemon=True).start()
 
-    # Phase 3: Spin up the Execution Arms
-    grid = GridEngine()   # NOTE: stub - it only writes PENDING_GRID rows and places no orders
-    threading.Thread(target=grid.start, daemon=True).start()
-
+    # Phase 3: Spin up the Execution Arms (GridEngine stub intentionally not started)
     threading.Thread(target=spot_engine_loop, daemon=True).start()
     threading.Thread(target=futures_engine_loop, daemon=True).start()
 
@@ -255,7 +255,8 @@ def toggle_btc_gate():
 
 @app.route("/api/status", methods=["GET"])
 def api_status():
-    is_paper = (get_trade_mode() == "PAPER")
+    current_mode = get_trade_mode()
+    is_paper = (current_mode == "PAPER")
 
     halt_row = execute_query("SELECT value FROM bot_settings WHERE key = 'macro_halt'", fetch_one=True)
     is_halted = bool(halt_row and str(halt_row["value"]).strip() == "1")
@@ -268,6 +269,11 @@ def api_status():
     prices_ts = float(MARKET_STATE.get("prices_ts") or 0.0)
     prices_age = (time.time() - prices_ts) if prices_ts > 0 else None
 
+    acct_row = execute_query("SELECT account_id FROM accounts WHERE futures_enabled = 1 ORDER BY id ASC LIMIT 1", fetch_one=True)
+    acct_id = acct_row["account_id"] if acct_row else "Emmanuel_Paper_150"
+    bot_state = get_futures_bot_state(acct_id, current_mode)
+    btc_ema_trend = calculate_futures_macro_trend()
+
     allowed, gate_reason = is_trading_allowed_by_btc_gate()
     return jsonify({
         "btc_gate_override": gate_override,
@@ -279,7 +285,14 @@ def api_status():
         "btc_gate_reason": gate_reason,
         "ws_connected": MARKET_STATE.get("ws_connected", False),
         "execution_mode": "PAPER TRADING" if is_paper else "LIVE TRADING",
-        "macro_regime": btc_regime_row["regime"] if btc_regime_row else "TRENDING"
+        "macro_regime": btc_regime_row["regime"] if btc_regime_row else "TRENDING",
+        "btc_ema_trend": btc_ema_trend,
+        "btc_market_state": bot_state["market_state"],
+        "btc_efficiency_ratio": bot_state["efficiency_ratio"],
+        "futures_bot_state": bot_state["state"],
+        "futures_bot_reason": bot_state["reason"],
+        "futures_risk_multiplier": bot_state["risk_multiplier"],
+        "futures_max_positions": bot_state["max_positions"],
     })
 
 # =============================================================================
@@ -291,6 +304,9 @@ def api_btc_sentiment():
     return jsonify({
         "sentiment": MARKET_STATE.get("btc_sentiment", "NEUTRAL"),
         "trend": MARKET_STATE.get("btc_trend", "NEUTRAL"),
+        "ema_trend": calculate_futures_macro_trend(),
+        "market_state": MARKET_STATE.get("btc_market_state", "TREND"),
+        "efficiency_ratio": MARKET_STATE.get("btc_efficiency_ratio", 1.0),
         "atr": f"{MARKET_STATE.get('btc_atr_1h', 0.0):.2f}",
         "change_24h": f"{MARKET_STATE.get('btc_24h_change', 0.0):+.2f}%",
         "buy_pressure": f"{MARKET_STATE.get('buy_pressure_pct', 50.0)}%",
@@ -303,7 +319,7 @@ def api_powder_keg():
     pairs = execute_query("""
         SELECT pair, last_price, oi_spot_ratio, change_24h_pct
         FROM trading_pairs
-        WHERE oi_spot_ratio > 3.0 AND futures_supported = 1
+        WHERE status = 'ACTIVE' AND oi_spot_ratio > 3.0 AND futures_supported = 1
         ORDER BY oi_spot_ratio DESC LIMIT 5
     """, fetch_all=True)
     return jsonify(pairs if pairs else [])
@@ -518,6 +534,101 @@ def liquidate_all():
                     "skipped_live": skipped_live, "skipped_no_price": skipped_no_price})
 
 # =============================================================================
+# PERFORMANCE STATISTICS (streaks, profit factor, expectancy...)
+# =============================================================================
+
+def _parse_ts(value):
+    try:
+        dt = datetime.fromisoformat(str(value))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+def _runs(pnls_times):
+    """Splits a chronological list of (pnl, closed_at) into consecutive win / loss runs."""
+    runs = []
+    for pnl, closed_at in pnls_times:
+        kind = "W" if pnl > 0 else "L"
+        if runs and runs[-1]["type"] == kind:
+            runs[-1]["length"] += 1
+            runs[-1]["net"] += pnl
+            runs[-1]["end"] = closed_at
+        else:
+            runs.append({"type": kind, "length": 1, "net": pnl, "start": closed_at, "end": closed_at})
+    return runs
+
+def _performance(trades: list, pnl_key: str, futures: bool = False) -> dict:
+    """Statistics over CLOSED trades, oldest first. Win = PnL above zero."""
+    n = len(trades)
+    if n == 0:
+        return {"trades": 0}
+
+    pnl = [float(t.get(pnl_key) or 0.0) for t in trades]
+    wins = [p for p in pnl if p > 0]
+    losses = [p for p in pnl if p <= 0]
+    gross_profit, gross_loss = sum(wins), -sum(losses)
+    avg_win = (gross_profit / len(wins)) if wins else 0.0
+    avg_loss = (sum(losses) / len(losses)) if losses else 0.0   # negative number
+
+    runs = _runs([(p, t.get("closed_at")) for p, t in zip(pnl, trades)])
+    def longest(kind):
+        cand = [r for r in runs if r["type"] == kind]
+        if not cand:
+            return None
+        r = max(cand, key=lambda x: x["length"])
+        return {"length": r["length"], "start": r["start"], "end": r["end"], "net": round(r["net"], 4)}
+
+    holds = []
+    for t in trades:
+        a, b = _parse_ts(t.get("opened_at")), _parse_ts(t.get("closed_at"))
+        if a and b:
+            holds.append((b - a).total_seconds() / 60.0)
+
+    now = datetime.now(timezone.utc)
+    def pnl_since(hours):
+        total = 0.0
+        for p, t in zip(pnl, trades):
+            ts = _parse_ts(t.get("closed_at"))
+            if ts and (now - ts).total_seconds() <= hours * 3600:
+                total += p
+        return round(total, 4)
+
+    out = {
+        "trades": n, "wins": len(wins), "losses": len(losses),
+        "win_rate": round(len(wins) / n * 100.0, 2),
+        "net_pnl": round(sum(pnl), 4),
+        "gross_profit": round(gross_profit, 4), "gross_loss": round(-gross_loss, 4),
+        "profit_factor": round(gross_profit / gross_loss, 3) if gross_loss > 0 else None,
+        "avg_win": round(avg_win, 4), "avg_loss": round(avg_loss, 4),
+        "payoff_ratio": round(avg_win / abs(avg_loss), 3) if wins and losses and avg_loss != 0 else None,
+        "breakeven_win_rate": round(abs(avg_loss) / (avg_win + abs(avg_loss)) * 100.0, 2) if wins and losses and (avg_win + abs(avg_loss)) > 0 else None,
+        "expectancy": round(sum(pnl) / n, 4),
+        "best_trade": round(max(pnl), 4), "worst_trade": round(min(pnl), 4),
+        "longest_win_streak": longest("W"), "longest_loss_streak": longest("L"),
+        "current_streak": {"type": runs[-1]["type"], "length": runs[-1]["length"]},
+        "avg_hold_minutes": round(sum(holds) / len(holds), 1) if holds else None,
+        "pnl_24h": pnl_since(24), "pnl_7d": pnl_since(24 * 7),
+        "first_close": trades[0].get("closed_at"), "last_close": trades[-1].get("closed_at"),
+    }
+    if futures:
+        out["tp1_hits"] = sum(1 for t in trades if t.get("tp1_hit"))
+        out["stop_outs"] = sum(1 for t in trades if str(t.get("close_type") or "").startswith("STRUCTURAL SL"))
+        by_dir = {}
+        for direction in ("LONG", "SHORT"):
+            sub = [p for p, t in zip(pnl, trades) if t.get("direction") == direction]
+            if sub:
+                by_dir[direction] = {"trades": len(sub), "win_rate": round(sum(1 for p in sub if p > 0) / len(sub) * 100.0, 2), "net_pnl": round(sum(sub), 4)}
+        out["by_direction"] = by_dir
+    return out
+
+@app.route("/api/performance", methods=["GET"])
+def api_performance():
+    mode = get_trade_mode()
+    fut = execute_query("SELECT * FROM futures_trades WHERE status = 'CLOSED' AND trade_mode = ? ORDER BY closed_at ASC, id ASC", (mode,), fetch_all=True) or []
+    spot = execute_query("SELECT * FROM spot_trades WHERE status = 'CLOSED' AND trade_mode = ? ORDER BY closed_at ASC, id ASC", (mode,), fetch_all=True) or []
+    return jsonify({"mode": mode, "futures": _performance(fut, "pnl_usdt", futures=True), "spot": _performance(spot, "profit_usdt")})
+
+# =============================================================================
 # HISTORY & LOGS
 # =============================================================================
 
@@ -529,14 +640,14 @@ def api_trades():
         SELECT pair, 'FUTURES' as type, direction, exit_price, pnl_usdt as realized_pnl, close_type, pnl_pct, closed_at
         FROM futures_trades
         WHERE status = 'CLOSED' AND trade_mode = ?
-        ORDER BY closed_at DESC LIMIT 50
+        ORDER BY closed_at DESC LIMIT 200
     """, (current_mode,), fetch_all=True)
 
     spot_exits = execute_query("""
         SELECT pair, 'SPOT' as type, exit_price, profit_usdt as realized_pnl, profit_pct, closed_at
         FROM spot_trades
         WHERE status = 'CLOSED' AND trade_mode = ?
-        ORDER BY closed_at DESC LIMIT 70
+        ORDER BY closed_at DESC LIMIT 200
     """, (current_mode,), fetch_all=True)
 
     return jsonify({

@@ -69,11 +69,24 @@ if fut:
     be = (-avg_l / (avg_w - avg_l) * 100) if (avg_w - avg_l) else 0
     print(f"net ${sum(pn):.2f} | win rate {100 * len(wins) / len(pn):.1f}% | avg win ${avg_w:.2f} | avg loss ${avg_l:.2f}")
     print(f"break-even win rate at that payoff: {be:.1f}%   expectancy per trade: ${sum(pn) / len(pn):.2f}")
-    streak = best = 0
-    for p in pn:
-        streak = streak + 1 if p <= 0 else 0
-        best = max(best, streak)
-    print(f"longest losing streak: {best}   TP1 reached on {sum(1 for t in fut if t.get('tp1_hit'))} of {len(fut)} trades")
+    runs = []
+    for t in fut:
+        kind = "W" if t["pnl"] > 0 else "L"
+        if runs and runs[-1]["kind"] == kind:
+            runs[-1]["items"].append(t)
+        else:
+            runs.append({"kind": kind, "items": [t]})
+    def show(kind, label):
+        cand = [r for r in runs if r["kind"] == kind]
+        if not cand:
+            print(f"{label}: none")
+            return
+        r = max(cand, key=lambda x: len(x["items"]))
+        a, b = r["items"][0]["closed_at"], r["items"][-1]["closed_at"]
+        print(f"{label}: {len(r['items'])} in a row  ({str(a)[5:16]} -> {str(b)[5:16]} UTC, net ${sum(x['pnl'] for x in r['items']):+.2f})")
+    show("W", "longest WIN streak ")
+    show("L", "longest LOSING streak")
+    print(f"current streak: {runs[-1]['kind']}{len(runs[-1]['items'])}   TP1 reached on {sum(1 for t in fut if t.get('tp1_hit'))} of {len(fut)} trades")
 
     stops = [t for t in fut if str(t.get("close_type", "")).startswith("STRUCTURAL SL")]
     clustered, group = 0, []

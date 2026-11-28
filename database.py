@@ -58,6 +58,19 @@ def execute_query(query: str, params: tuple = (), fetch_one: bool = False, fetch
     finally:
         conn.close()
 
+def execute_update_rowcount(query: str, params: tuple = ()) -> int:
+    """Runs a single UPDATE/DELETE in one commit and returns rows modified (for atomic status guards)."""
+    conn = get_connection()
+    try:
+        if IS_POSTGRES:
+            query = query.replace("?", "%s")
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()
+
 def execute_batch(statements) -> int:
     """
     Runs many (query, params) statements in ONE connection and ONE commit.
@@ -196,13 +209,14 @@ def init_db():
             dynamic_tp1 REAL DEFAULT 0.0,
             watermark_price REAL DEFAULT 0.0,
             tp1_hit INTEGER DEFAULT 0,
+            entry_context TEXT DEFAULT '',
             
             opened_at TEXT NOT NULL,
             closed_at TEXT
         )
     """, commit=True)
 
-    # --- DYNAMIC MIGRATION: Inject Take-Profit tracking columns into existing trade tables ---
+    # --- DYNAMIC MIGRATION: Inject Take-Profit & telemetry columns into existing trade tables ---
     tp_columns = {
         "tp1_hit": "INTEGER DEFAULT 0",
         "tp2_hit": "INTEGER DEFAULT 0",
@@ -214,6 +228,10 @@ def init_db():
                 execute_query(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}", commit=True)
             except Exception:
                 pass # Column already exists, proceed normally
+    try:
+        execute_query("ALTER TABLE futures_trades ADD COLUMN entry_context TEXT DEFAULT ''", commit=True)
+    except Exception:
+        pass
 
     # --- DYNAMIC MIGRATION: sniper columns for databases created before the 75/25 upgrade ---
     sniper_columns = {

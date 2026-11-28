@@ -57,7 +57,9 @@ SPOT_CONFIG = {
 
     # --- NEW: spot risk controls ---
     "min_tp_pct": 1.2,               # TP is never closer than 1.2% (a 0.2% round-trip fee eats tiny targets)
+    "max_tp_pct": 8.0,               # Cap TP at 8% so wide zones don't hold bags until they reverse into a stop
     "max_drawdown_pct": 12.0,        # Sell a bag that is 12% under water (0 = never, the old accumulator behaviour)
+    "pause_on_btc_ranging": False,   # Spot SMC demand-zone bounces hedge Futures in ranging/chop; set True to pause
     "pair_cooldown_after_loss_seconds": 14400,  # After a losing close, do not re-buy that coin for 4h
     "skip_log_interval_seconds": 300,
 }
@@ -79,15 +81,34 @@ FUTURES_CONFIG = {
     "trailing_buffer_pct": 1.5,      # Runner trails the peak by 1.5% (was 3.0 = ~45% of margin at 15x)
 
     # --- NEW: risk controls ---
-    "min_stop_pct": 0.4,             # Skip trades whose stop is closer than this (noise stop-outs, pennies of profit)
+    "min_stop_pct": 0.5,             # Skip trades whose stop is closer than this (noise stop-outs, pennies of profit)
     "max_stop_pct": 2.0,             # Skip trades whose stop is further than this (at 15x, 2% = 30% of margin)
-    "risk_per_trade_usdt": 0.50,     # Target loss if the stop is hit; margin is sized from this
+    "risk_per_trade_usdt": 0.50,     # Target loss if the stop is hit (including round-trip fees & slippage)
     "max_margin_pct_per_trade": 5.0, # Never put more than 5% of balance into one trade's margin
     "pair_stop_cooldown_seconds": 7200,   # After a stop-out, don't re-enter that pair for 2h
     "pair_close_cooldown_seconds": 1800,  # After any other close, wait 30 min on that pair
     "min_volume_24h_usd": 20_000_000,     # Skip thin coins (BREV/MMT-style gaps)
     "skip_log_interval_seconds": 300,     # One "why entries were skipped" summary per 5 min
     "paper_slippage_pct": 0.02,           # Paper fills are 0.02% worse than the quote (entry and every exit)
+    "live_slippage_buffer_pct": 0.04,     # Round-trip slippage buffer used when sizing LIVE trades
+
+    # --- SELF-AWARENESS: probation & regime caution ---
+    "probation_loss_streak": 3,           # Consecutive closed losses before entering PROBATION (0 = disabled)
+    "probation_risk_multiplier": 0.25,    # Risk multiplier during PROBATION ($0.50 -> $0.125)
+    "probation_max_positions": 2,         # Max simultaneous open futures slots during PROBATION
+    "probation_wins_to_recover": 1,       # Consecutive winning closes required to exit PROBATION
+    "caution_risk_multiplier": 0.50,      # Risk multiplier during BTC CHOP/SHOCK ($0.50 -> $0.25)
+    "caution_max_positions": 2,           # Max simultaneous open futures slots during CAUTION
+    "throttle_on_btc_chop": True,         # Enter CAUTION when BTC 1h structure is choppy
+    "throttle_on_btc_shock": True,        # Enter CAUTION when BTC 4h move is a shock
+}
+
+# --- MARKET REGIME / CHOP-SHOCK CLASSIFIER ---
+REGIME_CONFIG = {
+    "bbw_ranging_threshold_pct": 2.5,
+    "er_lookback_candles": 12,            # 12h Kaufman Efficiency Ratio window
+    "er_chop_threshold": 0.25,            # ER below 0.25 = choppy/directionless whip-saw
+    "shock_4h_move_pct": 3.5,             # |4h move| >= 3.5% = sudden shock/impulse regime
 }
 
 # --- DYNAMIC RISK MANAGEMENT (ATR SIZING) ---
@@ -161,5 +182,10 @@ MARKET_SCANNER_CONFIG = {
     "volume_spike_multiplier": 0.0,
 
     # Tokenized stocks / equity tokens (market hours, gaps, thin books). Add more tickers here.
-    "excluded_bases": ["SPCXB", "SOXLB", "NVDAB", "QQQB", "INTCB", "KORUB", "MUB", "SNXXB"],
+    "excluded_bases": [
+        "SPCXB", "SOXLB", "NVDAB", "QQQB", "INTCB", "KORUB", "MUB", "SNXXB",
+        "COINB", "NBISB", "GOOGLB", "SOXSB", "ANTB", "AAPLB", "AMZNB", "MSFTB",
+        "TSLAB", "METAB", "PLTRB", "MSTRB", "SPYB", "CRCLB", "HOODB", "AMDB",
+        "ORCLB", "NFLXB",
+    ],
 }

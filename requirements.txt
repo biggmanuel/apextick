@@ -1,0 +1,9 @@
+# Runtime
+flask
+ccxt
+pandas
+python-dotenv
+requests
+websocket-client
+# Optional: only if DATABASE_URL points at PostgreSQL (SQLite is the default and the tested path)
+# psycopg2-binary

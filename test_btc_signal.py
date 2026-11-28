@@ -87,8 +87,8 @@ class FakeFut:
     def __init__(self): self.calls = 0
     def fetch_open_interest(self, sym): self.calls += 1; return {"openInterestValue": 5_000_000.0}
 mk = lambda base: {"base": base, "quote": "USDT", "active": True, "spot": True}
-markets = {f"{b}/USDT": mk(b) for b in ("BTC", "ETH", "AAA", "JUP", "BTCUP", "SOXLB", "LOW", "HELD", "USDC")}
-vol = {"BTC": 9e9, "ETH": 5e9, "AAA": 4e8, "JUP": 3e8, "BTCUP": 9e8, "SOXLB": 9e8, "LOW": 1e6, "HELD": 1e6, "USDC": 9e9}
+markets = {f"{b}/USDT": mk(b) for b in ("BTC", "ETH", "AAA", "JUP", "BTCUP", "SOXLB", "COINB", "NBISB", "GOOGLB", "SOXSB", "LOW", "HELD", "USDC")}
+vol = {"BTC": 9e9, "ETH": 5e9, "AAA": 4e8, "JUP": 3e8, "BTCUP": 9e8, "SOXLB": 9e8, "COINB": 9e8, "NBISB": 9e8, "GOOGLB": 9e8, "SOXSB": 9e8, "LOW": 1e6, "HELD": 1e6, "USDC": 9e9}
 tickers = {f"{b}/USDT": {"last": 10.0, "percentage": 1.5, "quoteVolume": v} for b, v in vol.items()}
 tickers["BTC/USDT"]["last"] = 91000.0; tickers["BTC/USDT"]["percentage"] = -2.0
 fut = FakeFut(); fut_markets = {"AAA/USDT:USDT": {}, "ETH/USDT:USDT": {}}
@@ -100,8 +100,8 @@ q("INSERT INTO futures_trades (account_id,pair,trade_mode,direction,status,entry
 n = B.sync_binance_pairs()
 active = {r["pair"] for r in q("SELECT pair FROM trading_pairs WHERE status='ACTIVE'", fetch_all=True)}
 check("hot list = liquid coins only (AAA, JUP, ETH)", {"AAA/USDT", "JUP/USDT", "ETH/USDT"} <= active and n == 3, f"n={n}")
-check("JUP kept (not mistaken for a leveraged token), BTCUP/stablecoin/tokenized stock excluded",
-      "JUP/USDT" in active and not ({"BTCUP/USDT", "SOXLB/USDT", "USDC/USDT", "LOW/USDT"} & active))
+check("JUP kept (not mistaken for a leveraged token), BTCUP/stablecoin/tokenized stocks excluded",
+      "JUP/USDT" in active and not ({"BTCUP/USDT", "SOXLB/USDT", "COINB/USDT", "NBISB/USDT", "GOOGLB/USDT", "SOXSB/USDT", "USDC/USDT", "LOW/USDT"} & active))
 check("pair that dropped out of the list is deactivated", q("SELECT status s FROM trading_pairs WHERE pair='OLD/USDT'", fetch_one=True)["s"] == "INACTIVE")
 check("pair with an OPEN position stays ACTIVE (keeps getting prices)", "HELD/USDT" in active)
 check("BTC trend tracked from the scan", MS["btc_trend"] == "BEARISH" and MS["btc_price"] == 91000.0)
@@ -110,5 +110,26 @@ B.sync_binance_pairs()
 check("open interest is cached between scans", fut.calls == calls_first and calls_first == 2, f"calls {calls_first} -> {fut.calls}")
 aaa = q("SELECT oi_usd, oi_spot_ratio FROM trading_pairs WHERE pair='AAA/USDT'", fetch_one=True)
 check("oi ratio = OI / 24h volume", abs(aaa["oi_spot_ratio"] - 5e6 / 4e8) < 1e-9, str(aaa))
+
+# ---------------- miniTicker parser & port-443 WS endpoint list
+mini = [
+    {"s": "BTCUSDT", "c": "105.0", "o": "100.0"},
+    {"s": "ETHUSDT", "c": "2000.0", "P": "-2.5"},
+    {"s": "ETHBTC", "c": "0.05", "o": "0.05"},
+    {"s": "BADUSDT", "c": "0", "o": "10"},
+]
+parsed = dict((p, (c, chg)) for p, c, chg in B._parse_ticker_payload(mini))
+check("miniTicker computes 24h % from c and o, keeps legacy P, skips non-USDT/zero",
+      "BTC/USDT" in parsed and abs(parsed["BTC/USDT"][1] - 5.0) < 1e-6
+      and "ETH/USDT" in parsed and abs(parsed["ETH/USDT"][1] - (-2.5)) < 1e-6
+      and "ETH/BTC" not in parsed and "BAD/USDT" not in parsed, str(parsed))
+
+os.environ.pop("BINANCE_WS_BASE", None)
+urls = B._get_ws_urls("/ws/!miniTicker@arr")
+check("default WS endpoints use port 443 vision + binance fallback",
+      len(urls) == 2 and urls[0] == "wss://data-stream.binance.vision/ws/!miniTicker@arr" and urls[1] == "wss://stream.binance.com:443/ws/!miniTicker@arr", str(urls))
+os.environ["BINANCE_WS_BASE"] = "wss://custom.example.com/"
+check("BINANCE_WS_BASE env override respected", B._get_ws_urls("/ws/!miniTicker@arr") == ["wss://custom.example.com/ws/!miniTicker@arr"])
+os.environ.pop("BINANCE_WS_BASE")
 
 print("\nFAILED:", fails if fails else "none"); sys.exit(1 if fails else 0)
